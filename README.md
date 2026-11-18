@@ -163,6 +163,8 @@ boss contacts                    # 沟通列表: paged (10/page) + server-side f
 boss contacts --pages 3 --apply-status 703 --within 90   # 考虑机会 + 90 天内开始沟通
 boss contacts --source 3 --job <encryptJobId>            # per-job list
 boss contacts --all --limit 10   # every relation (getBaseInfoList: chatStatus/waterLevel, no lid)
+boss resume <securityId>         # 牛人简历: 期望 / 工作 / 教育 / 项目（batchRunV2）
+boss history <geekId> --security-id <sid> --text   # 与该牛人的聊天记录（IM protobuf 文本尽力抽取）
 boss rcmd <jobId>                # 推荐牛人 for one of my jobs (needs an ONLINE job)
 boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
 
@@ -178,7 +180,8 @@ boss api --secret /api/<non-whitelisted-plain-path> k=v   # plain call signed wi
 Verified live against a real recruiter session: `me`, `me --full` (all 16 subs of the account batch:
 dynamic bar / bottom buttons / item mall / deliver schedule / not-chat-key jobs / security scenes …),
 `jobs`, and `contacts` (paged `zprelation/bossTag/contactList`, total caps at 1000, server-side
-`filter` works: `{"geek-apply-status":"703"}` → 31 条) answer code 0. `rcmd` answers inner `200001 当前职位不在线` when the jobId is not an online
+`filter` works: `{"geek-apply-status":"703"}` → 31 条), `resume` (geekBase4Vip + 期望/工作/教育/项目)
+and `history` (3 messages with their real text) answer code 0. `rcmd` answers inner `200001 当前职位不在线` when the jobId is not an online
 posting, and geek search answers `1 发布职位后才能查看牛人哦` without one — both are the server's
 account-state answers, not signing failures. `greet` therefore cannot be verified live on an account
 with no online job (no geek card ⇒ no `securityId` to greet): its param set and signing are pinned by
@@ -376,6 +379,8 @@ boss contacts                    # 沟通列表：分页（10/页）+ 服务端�
 boss contacts --pages 3 --apply-status 703 --within 90   # 考虑机会 + 90 天内开始沟通
 boss contacts --source 3 --job <encryptJobId>            # 按职位看
 boss contacts --all --limit 10   # 全部关系（getBaseInfoList：chatStatus/waterLevel，但没有 lid）
+boss resume <securityId>         # 牛人简历：期望 / 工作 / 教育 / 项目（batchRunV2）
+boss history <geekId> --security-id <sid> --text   # 与该牛人的聊天记录（IM protobuf，尽力抽文本）
 boss rcmd <jobId>                # 某职位的推荐牛人（职位需在线）
 boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
 
@@ -390,7 +395,8 @@ boss api --secret /api/<不在白名单的普通路径> k=v      # 用 secretKey
 
 已用真实招聘端 session 实测：`me`、`me --full`（账户批次的全部 16 个子请求：动态栏 / 底部按钮 / 权益商城 /
 交付进度 / 未沟通职位 / 安全场景 …）、`jobs`、`contacts`（分页 `zprelation/bossTag/contactList`，total 上限
-1000，服务端 `filter` 生效：`{"geek-apply-status":"703"}` → 31 条）都返回 code 0。jobId 不是在线职位时 `rcmd` 内层返回
+1000，服务端 `filter` 生效：`{"geek-apply-status":"703"}` → 31 条）、`resume`（geekBase4Vip + 期望/工作/教育/项目）、
+`history`（3 条消息，正文可读）都返回 code 0。jobId 不是在线职位时 `rcmd` 内层返回
 `200001 当前职位不在线`，没有在线职位时牛人搜索返回 `1 发布职位后才能查看牛人哦` —— 都是服务端对账号状态的
 答复，不是加签失败。用真实卡片（`boss contacts --json` 的 securityId/lid/geekId/expectId）实发 `greet`
 返回 `110 当前账号状态异常，暂不支持此操作` —— 同样是账号级限制。要点：`greet` **只能走 batchRunV2**

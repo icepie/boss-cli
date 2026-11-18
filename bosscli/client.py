@@ -298,6 +298,9 @@ class BossClient:
     BOSS_CONTACT_LIST_PATH = "/api/zprelation/bossTag/contactList"  # 沟通列表：分页 + 服务端筛选
     BOSS_CONTACT_FILTER_PATH = "/api/zprelation/bossTag/contactFilter"  # 可选筛选项/排序表
     BOSS_FRIEND_IDS_PATH = "/api/zprelation/friend/getFriendIdList"  # 会话对象 id 分桶
+    BOSS_RESUME_PATH = "/api/zpjob/view/pre/vip/geek/detail"  # GetGeekResumeVipRequest — 牛人简历
+    BOSS_HISTORY_PATH = "/api/zpchat/message/historyMsg"      # HistoryChatRequest — 聊天历史
+    BOSS_SEND_MSG_PATH = "/api/zpchat/message/send"           # HTTP fallback; 参数集未复原 (17)
 
     # UserAccountBossBatchRequest, exactly as module/login/util/g.java:c builds it (16 subs).
     BOSS_ACCOUNT_SUBS = [
@@ -406,6 +409,32 @@ class BossClient:
     def contact_page_meta(resp: dict) -> dict:
         zd = (BossClient.batch_v2_sub(resp, BossClient.BOSS_CONTACT_LIST_PATH).get("zpData") or {})
         return {"total": zd.get("total"), "hasMore": zd.get("hasMore")}
+
+    def boss_resume(self, security_id: str) -> dict:
+        """GetGeekResumeVipRequest — /api/zpjob/view/pre/vip/geek/detail, wrapped in batchRunV2
+        (plain answers 71 参数格式异常 like every other recruiter path). Verified live: zpData carries
+        geekBase4Vip + geekExpPos4VipList / geekEduExp4VipList / geekWorkExp4VipList /
+        geekProjExp4VipList / geekQuestInfo4Vip. The card's securityId is the input."""
+        return self.call_batch_v2([{"path": self.BOSS_RESUME_PATH, "params": {"securityId": security_id}}])
+
+    def boss_history(self, friend_id, security_id: str | None = None, friend_source: int = 0,
+                     count: int = 20, max_msg_id: int = 0) -> dict:
+        """HistoryChatRequest — /api/zpchat/message/historyMsg via batchRunV2. Verified live:
+        {hasMore, minMsgId, messages} where each message is a base64 protobuf (IM wire format), so
+        the text is not parsed here — pass max_msg_id=minMsgId to page further back."""
+        params = {"friendId": str(friend_id), "friendSource": str(friend_source),
+                  "securityId": security_id, "maxMsgId": str(max_msg_id), "count": str(count)}
+        return self.call_batch_v2([{"path": self.BOSS_HISTORY_PATH, "params": params}])
+
+    @staticmethod
+    def parse_history(resp: dict) -> dict:
+        zd = BossClient.batch_v2_sub(resp, BossClient.BOSS_HISTORY_PATH).get("zpData") or {}
+        return {"messages": zd.get("messages") or [], "hasMore": zd.get("hasMore"),
+                "minMsgId": zd.get("minMsgId")}
+
+    @staticmethod
+    def parse_resume(resp: dict) -> dict:
+        return BossClient.batch_v2_sub(resp, BossClient.BOSS_RESUME_PATH).get("zpData") or {}
 
     @staticmethod
     def parse_boss_contacts(resp: dict) -> list[dict]:

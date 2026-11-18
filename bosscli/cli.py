@@ -556,6 +556,81 @@ def cmd_boss_contacts(args):
               f"geekId={ct.get('geekId')} lid={ct.get('lid')} securityId={_short(ct.get('securityId'))}")
 
 
+def _im_text(blob: str) -> str:
+    """Best-effort text out of an IM message: the wire format is a base64 protobuf with
+    length-prefixed UTF-8 strings. Pulls the longest CJK/ASCII runs so a message is readable
+    without a schema; URLs and stray flags are filtered out."""
+    import base64, re
+    try:
+        raw = base64.b64decode(blob + "=" * (-len(blob) % 4))
+    except Exception:
+        return ""
+    out = []
+    for m in re.finditer(rb"(?:[\x20-\x7e]|[\xe4-\xe9][\x80-\xbf]{2}){2,}", raw):
+        try:
+            t = m.group().decode("utf-8")
+        except Exception:
+            continue
+        if t.startswith(("http://", "https://")) and len(t) > 60:
+            continue
+        out.append(t.strip())
+    return " ".join(dict.fromkeys(x for x in out if len(x) >= 2))
+
+
+def _hl(v) -> str:
+    """Resume fields may be highlight objects {"content": ..., "indexList": [...]} — unwrap to text."""
+    if isinstance(v, dict):
+        return str(v.get("content") or "")
+    return "" if v is None else str(v)
+
+
+def cmd_boss_resume(args):
+    """牛人简历（GetGeekResumeVipRequest → batchRunV2），securityId 来自 contacts/rcmd 卡片。"""
+    client = _client(args)
+    resp = _run(lambda: client.boss_resume(args.security_id))
+    _check_code(resp, "batchRunV2", client, side="boss")
+    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_RESUME_PATH)
+    _sub_check(sub, "resume", client)
+    zd = BossClient.parse_resume(resp)
+    if args.json:
+        print(json.dumps(zd, ensure_ascii=False, indent=2)); return
+    base = zd.get("geekBase4Vip") or {}
+    print(f"# {base.get('name','')} · {base.get('gender')=='1' and '男' or '女'} · "
+          f"{base.get('ageDesc','')} · {base.get('workYearsDesc','')} · {base.get('degreeCategory','')}")
+    if base.get("applyStatusContent") or base.get("applyStatus"):
+        print(f"  状态: {base.get('applyStatusContent') or base.get('applyStatus')}")
+    for e in zd.get("geekExpPos4VipList") or []:
+        bits = [_hl(e.get(k)) for k in ("positionName", "salaryDesc", "locationName")]
+        print("  期望: " + " | ".join(b for b in bits if b))
+    for e in zd.get("geekWorkExp4VipList") or []:
+        span = f"{e.get('startDate','')}-{e.get('endDate','') or '至今'}"
+        print(f"  经历: {_hl(e.get('company'))} · {_hl(e.get('positionName'))} · {span}")
+        if e.get("responsibility") and not args.brief:
+            print(f"        {_hl(e.get('responsibility')).replace(chr(10), ' ')[:200]}")
+    for e in zd.get("geekEduExp4VipList") or []:
+        print(f"  教育: {_hl(e.get('school'))} · {e.get('startDate','')}-{e.get('endDate','') or '至今'}")
+    for e in zd.get("geekProjExp4VipList") or []:
+        print(f"  项目: {_hl(e.get('name'))} · {_hl(e.get('roleName'))} "
+              f"· {e.get('startDate','')}-{e.get('endDate','') or '至今'}")
+
+
+def cmd_boss_history(args):
+    """聊天历史（HistoryChatRequest → batchRunV2）。消息是 IM protobuf，--text 尽力抽取可见文本。"""
+    client = _client(args)
+    resp = _run(lambda: client.boss_history(args.friend_id, security_id=args.security_id,
+                                            friend_source=args.friend_source, count=args.count))
+    _check_code(resp, "batchRunV2", client, side="boss")
+    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_HISTORY_PATH)
+    _sub_check(sub, "history", client)
+    hist = BossClient.parse_history(resp)
+    if args.json:
+        print(json.dumps(hist, ensure_ascii=False, indent=2)); return
+    print(f"# 聊天记录 {len(hist['messages'])} 条（hasMore={hist['hasMore']} minMsgId={hist['minMsgId']}）")
+    for i, blob in enumerate(hist["messages"], 1):
+        text = _im_text(blob) if (args.text or not args.raw) else ""
+        print(f"- #{i} {('' if not text else text[:160])}")
+
+
 def cmd_boss_greet(args):
     """WRITE — 招聘端给牛人打招呼 (BossCreateFriendRequest). securityId/lid/friend-id/expect-id 都来自
     `boss rcmd <jobId> --json` 的推荐卡；dry-run by default, --confirm actually sends."""
@@ -827,6 +902,24 @@ def main(argv=None):
     ctp.add_argument("--json", action="store_true")
     ctp.add_argument("--token", help="override t2 auth token")
     ctp.set_defaults(func=cmd_boss_contacts)
+
+    rsp = sub.add_parser("resume", help="(招聘端) 看牛人简历（securityId 来自 contacts/rcmd）")
+    rsp.add_argument("security_id")
+    rsp.add_argument("--brief", action="store_true", help="不打印工作经历的责任描述")
+    rsp.add_argument("--json", action="store_true")
+    rsp.add_argument("--token", help="override t2 auth token")
+    rsp.set_defaults(func=cmd_boss_resume)
+
+    hsp = sub.add_parser("history", help="(招聘端) 看与某牛人的聊天记录（--text 抽取可见文本）")
+    hsp.add_argument("friend_id", help="牛人 geekId/friendId（contacts 卡片）")
+    hsp.add_argument("--security-id", help="同一张卡片的 securityId（服务端用于鉴权）")
+    hsp.add_argument("--friend-source", type=int, default=0)
+    hsp.add_argument("--count", type=int, default=20, help="拉取条数（默认 20）")
+    hsp.add_argument("--text", action="store_true", help="尽力抽取消息可见文本（protobuf 无 schema）")
+    hsp.add_argument("--raw", action="store_true", help="只列条数，不抽取文本")
+    hsp.add_argument("--json", action="store_true")
+    hsp.add_argument("--token", help="override t2 auth token")
+    hsp.set_defaults(func=cmd_boss_history)
 
     gp = sub.add_parser("greet", help="(招聘端) 给牛人打招呼（写操作，dry-run 除非 --confirm）")
     gp.add_argument("security_id", help="牛人卡片的 securityId（来自 `boss rcmd --json`）")

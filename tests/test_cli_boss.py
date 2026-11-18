@@ -24,6 +24,8 @@ class Fake:
 
     def boss_jobs(self, **kw): return self.resp
     def boss_contacts(self, **kw): return self.resp
+    def boss_resume(self, security_id, **kw): return self.resp
+    def boss_history(self, friend_id, **kw): return self.resp
     def boss_contacts_base(self, **kw): return self.resp
     def boss_account(self, full=False): return self.resp
     def boss_recommend_geeks(self, job_id, **kw): self.kw = dict(kw, job_id=job_id); return self.resp
@@ -216,3 +218,40 @@ def test_contacts_all_mode_uses_base_list(monkeypatch, capsys):
     _run(monkeypatch, fake, ["contacts", "--all"])
     out = capsys.readouterr().out
     assert "全部关系 1 条" in out and "邵杭" in out
+
+
+def test_resume_renders_highlight_fields(monkeypatch, capsys):
+    zd = {"geekBase4Vip": {"name": "周辰", "gender": 1, "ageDesc": "23岁", "workYearsDesc": "1年",
+                           "degreeCategory": "本科", "applyStatusContent": "离职-随时到岗"},
+          "geekExpPos4VipList": [{"positionName": "大模型算法", "salaryDesc": "5-8K",
+                                  "locationName": "长沙"}],
+          "geekWorkExp4VipList": [{"company": "玄甲公司", "positionName": "Java",
+                                   "startDate": "20251001", "endDate": "20251201"}],
+          "geekEduExp4VipList": [{"school": {"content": "********", "indexList": [{"start": 0, "end": 7}]},
+                                  "startDate": "20220101", "endDate": "20260101"}]}
+    fake = Fake(_sub(BossClient.BOSS_RESUME_PATH, {"code": 0, "zpData": zd}))
+    _run(monkeypatch, fake, ["resume", "SEC"])
+    out = capsys.readouterr().out
+    assert "周辰" in out and "大模型算法 | 5-8K | 长沙" in out
+    assert "玄甲公司 · Java · 20251001-20251201" in out
+    assert "********" in out and "'content'" not in out      # highlight object unwrapped
+
+
+def test_history_text_extraction(monkeypatch, capsys):
+    import base64
+    text = "您好 我是软件工程 2026 届本科生"
+    blob = base64.b64encode(b"\x0a\x32" + text.encode()).decode()
+    fake = Fake(_sub(BossClient.BOSS_HISTORY_PATH,
+                     {"code": 0, "zpData": {"hasMore": False, "minMsgId": 1, "messages": [blob]}}))
+    _run(monkeypatch, fake, ["history", "42", "--text"])
+    out = capsys.readouterr().out
+    assert "聊天记录 1 条" in out
+    assert "您好 我是软件工程 2026 届本科生" in out
+
+
+def test_history_raw_skips_extraction(monkeypatch, capsys):
+    fake = Fake(_sub(BossClient.BOSS_HISTORY_PATH,
+                     {"code": 0, "zpData": {"hasMore": True, "minMsgId": 7, "messages": ["QUJD"]}}))
+    _run(monkeypatch, fake, ["history", "42", "--raw"])
+    out = capsys.readouterr().out
+    assert "hasMore=True minMsgId=7" in out and "QUJD" not in out
