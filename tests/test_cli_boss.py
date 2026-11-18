@@ -255,3 +255,43 @@ def test_history_raw_skips_extraction(monkeypatch, capsys):
     _run(monkeypatch, fake, ["history", "42", "--raw"])
     out = capsys.readouterr().out
     assert "hasMore=True minMsgId=7" in out and "QUJD" not in out
+
+
+def test_im_urls_strips_protobuf_quotes():
+    import base64
+    from bosscli.cli import _im_urls
+    blob = base64.b64encode(b'\x0a\x22https://img.bosszhipin.com/a/b.jpeg"').decode()
+    assert _im_urls(blob) == ["https://img.bosszhipin.com/a/b.jpeg"]
+    assert _im_urls("not-base64!!") == []
+
+
+def test_ext_for_content_type_and_fallback():
+    from bosscli.cli import _ext_for
+    assert _ext_for("image/jpeg", "https://x/y") == ".jpg"
+    assert _ext_for("application/pdf; charset=binary", "https://x/y") == ".pdf"
+    assert _ext_for("", "https://x/y/简历.pdf?sign=1") == ".pdf"
+    assert _ext_for("application/octet-stream", "https://x/y") == ".bin"
+
+
+def test_history_download_lists_message_files(monkeypatch, capsys, tmp_path):
+    import base64
+    blob = base64.b64encode(b'\x0a\x1chttps://img.example.com/x.png').decode()
+    fake = Fake(_sub(BossClient.BOSS_HISTORY_PATH,
+                     {"code": 0, "zpData": {"hasMore": False, "minMsgId": 0, "messages": [blob]}}))
+
+    class Resp:
+        headers = {"content-type": "image/png"}
+        content = b"PNGDATA"
+        def raise_for_status(self): pass
+
+    class Http:
+        def get(self, url, timeout=20):
+            assert url == "https://img.example.com/x.png"
+            return Resp()
+
+    fake.http = Http()
+    _run(monkeypatch, fake, ["history", "42", "--download", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "消息内文件 1 个" in out and "已保存 1 个文件" in out
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1 and files[0].suffix == ".png" and files[0].read_bytes() == b"PNGDATA"

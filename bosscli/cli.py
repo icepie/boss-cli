@@ -614,6 +614,56 @@ def cmd_boss_resume(args):
               f"· {e.get('startDate','')}-{e.get('endDate','') or '至今'}")
 
 
+_EXT_BY_TYPE = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
+                "image/webp": ".webp", "image/gif": ".gif", "application/pdf": ".pdf",
+                "application/zip": ".zip", "text/plain": ".txt"}
+
+
+def _im_urls(blob: str) -> list[str]:
+    """Absolute URLs embedded in an IM message (base64 protobuf); quotes/backslashes from the
+    protobuf framing are stripped so the CDN answers 200."""
+    import base64, re
+    try:
+        raw = base64.b64decode(blob + "=" * (-len(blob) % 4))
+    except Exception:
+        return []
+    out = []
+    for m in re.finditer(rb"https?://[\x21-\x7e]+", raw):
+        u = m.group().decode("utf-8", "ignore").rstrip("\"\\'")
+        if u:
+            out.append(u)
+    return out
+
+
+def _ext_for(content_type: str, url: str) -> str:
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if ct in _EXT_BY_TYPE:
+        return _EXT_BY_TYPE[ct]
+    tail = url.split("?")[0].rsplit(".", 1)[-1].lower() if "." in url else ""
+    return "." + tail if tail.isalnum() and len(tail) <= 5 else ".bin"
+
+
+def _download_urls(client, urls: list[str], outdir: str) -> list[str]:
+    """Save each unique URL into outdir; returns the saved paths. CDN links need NO auth."""
+    import hashlib, os
+    os.makedirs(outdir, exist_ok=True)
+    saved = []
+    for u in dict.fromkeys(urls):
+        try:
+            r = client.http.get(u, timeout=20)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"[!] 下载失败 {u[:90]}: {type(e).__name__}", file=sys.stderr)
+            continue
+        name = hashlib.sha1(u.encode()).hexdigest()[:10] + _ext_for(r.headers.get("content-type"), u)
+        path = os.path.join(outdir, name)
+        with open(path, "wb") as f:
+            f.write(r.content)
+        saved.append(path)
+        print(f"[✓] {path}  ({len(r.content)} bytes)")
+    return saved
+
+
 def cmd_boss_history(args):
     """聊天历史（HistoryChatRequest → batchRunV2）。消息是 IM protobuf，--text 尽力抽取可见文本。"""
     client = _client(args)
@@ -626,6 +676,12 @@ def cmd_boss_history(args):
     if args.json:
         print(json.dumps(hist, ensure_ascii=False, indent=2)); return
     print(f"# 聊天记录 {len(hist['messages'])} 条（hasMore={hist['hasMore']} minMsgId={hist['minMsgId']}）")
+    if args.download:
+        urls = [u for blob in hist["messages"] for u in _im_urls(blob)]
+        print(f"# 消息内文件 {len(dict.fromkeys(urls))} 个 -> {args.download}")
+        saved = _download_urls(client, urls, args.download)
+        print(f"# 已保存 {len(saved)} 个文件")
+        return
     for i, blob in enumerate(hist["messages"], 1):
         text = _im_text(blob) if (args.text or not args.raw) else ""
         print(f"- #{i} {('' if not text else text[:160])}")
@@ -917,6 +973,8 @@ def main(argv=None):
     hsp.add_argument("--count", type=int, default=20, help="拉取条数（默认 20）")
     hsp.add_argument("--text", action="store_true", help="尽力抽取消息可见文本（protobuf 无 schema）")
     hsp.add_argument("--raw", action="store_true", help="只列条数，不抽取文本")
+    hsp.add_argument("--download", metavar="DIR",
+                     help="把消息里的图片/文件下载到 DIR（CDN 直链，无需登录）")
     hsp.add_argument("--json", action="store_true")
     hsp.add_argument("--token", help="override t2 auth token")
     hsp.set_defaults(func=cmd_boss_history)
