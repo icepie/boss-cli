@@ -24,6 +24,7 @@ class Fake:
 
     def boss_jobs(self, **kw): return self.resp
     def boss_contacts(self, **kw): return self.resp
+    def boss_contacts_base(self, **kw): return self.resp
     def boss_account(self, full=False): return self.resp
     def boss_recommend_geeks(self, job_id, **kw): self.kw = dict(kw, job_id=job_id); return self.resp
     def search(self, *a, **kw): return self.resp
@@ -151,8 +152,12 @@ def test_greet_dry_run_never_sends(monkeypatch, capsys):
     assert "dry-run" in out and "SEC" in out and "entrance" in out
 
 
+def _greet_env(sub):
+    return _sub(BossClient.BOSS_ADD_FRIEND_PATH, sub)
+
+
 def test_greet_confirm_sends_with_card_params(monkeypatch, capsys):
-    fake = Fake({"code": 0, "zpData": {"relation": {"name": "张三"}}})
+    fake = Fake(_greet_env({"code": 0, "zpData": {"relation": {"name": "张三"}}}))
     seen = {}
 
     def add(security_id, **kw):
@@ -171,33 +176,43 @@ def test_greet_falls_back_to_first_job(monkeypatch):
                {"code": 0, "zpData": {"jobList": [{"jobId": 42, "positionName": "后端"}]}})
     fake = Fake(env)
     seen = {}
-    fake.boss_add_friend = lambda security_id, **kw: (seen.update(kw), {"code": 0})[1]
+    fake.boss_add_friend = lambda security_id, **kw: (seen.update(kw), _greet_env({"code": 0}))[1]
     _run(monkeypatch, fake, ["greet", "SEC", "--confirm"])
     assert seen["job_id"] == "42"
 
 
-def test_greet_param_error_on_correct_side_has_no_identity_hint(monkeypatch, capsys):
-    # code 71 on the RIGHT identity means bad/missing params — blaming the identity would mislead.
+def test_greet_account_block_has_no_identity_hint(monkeypatch, capsys):
+    # code 110 当前账号状态异常 on the RIGHT identity => account-level block, not an identity problem.
     fake = Fake()
-    fake.boss_add_friend = lambda *a, **k: {"code": 71, "message": "参数格式异常，请您退出登录后重试."}
+    fake.boss_add_friend = lambda *a, **k: _greet_env(
+        {"code": 110, "message": "当前账号状态异常，暂不支持此操作，如有疑问请联系客服"})
     with pytest.raises(SystemExit) as e:
         _run(monkeypatch, fake, ["greet", "SEC", "--job-id", "1", "--confirm"])
     assert e.value.code == 2
     err = capsys.readouterr().err
-    assert "code=71" in err and "另一侧接口" not in err
+    assert "code=110" in err and "另一侧接口" not in err
 
 
-def test_contacts_renders_cards_with_limit(monkeypatch, capsys):
-    cards = [
-        {"name": "邵杭", "expectPositionName": "数据标注", "expectSalary": "10-12K", "degree": "本科",
-         "chatStatus": 0, "jobName": "AI产品开发助理", "friendId": 635638207, "securityId": "S1"},
-        {"name": "周辰", "expectPositionName": "大模型算法", "expectSalary": "5-8K", "degree": "本科",
-         "chatStatus": 0, "jobName": "AI产品开发助理", "friendId": 576846713, "securityId": "S2"},
-    ]
-    fake = Fake(_sub(BossClient.BOSS_CONTACTS_PATH,
-                     {"code": 0, "zpData": {"identity": 1, "topCount": 2, "baseInfoList": cards}}))
-    _run(monkeypatch, fake, ["contacts", "--limit", "1"])
+def test_contacts_paged_renders_cards(monkeypatch, capsys):
+    cards = [{"geekName": "周辰", "expectPositionName": "大模型算法", "salary": "5-8K",
+              "geekDegree": "本科", "applyStatusDesc": "离职-随时到岗", "chatCardCount": 0,
+              "actionDateDesc": "10月21日 19:21", "geekId": 576846713,
+              "lid": "L.1", "securityId": "S" * 40}]
+    fake = Fake(_sub(BossClient.BOSS_CONTACT_LIST_PATH,
+                     {"code": 0, "zpData": {"total": 1000, "hasMore": True, "cardList": cards}}))
+    _run(monkeypatch, fake, ["contacts"])
     out = capsys.readouterr().out
-    assert "已沟通牛人 2 个" in out
-    assert "邵杭" in out and "securityId=S1" in out
-    assert "周辰" not in out          # --limit applied
+    assert "沟通列表 1 条" in out and "total=1000" in out
+    assert "周辰" in out and "geekId=576846713" in out
+    assert "securityId=" + "S" * 40 not in out      # long securityId is truncated in tables
+
+
+def test_contacts_all_mode_uses_base_list(monkeypatch, capsys):
+    cards = [{"name": "邵杭", "expectPositionName": "数据标注", "expectSalary": "10-12K",
+              "chatStatus": 0, "jobName": "AI产品开发助理", "friendId": 635638207, "securityId": "S1"}]
+    fake = Fake(_sub(BossClient.BOSS_CONTACTS_PATH,
+                     {"code": 0, "zpData": {"identity": 1, "topCount": 1, "baseInfoList": cards}}))
+    fake.boss_contacts_base = lambda: fake.resp
+    _run(monkeypatch, fake, ["contacts", "--all"])
+    out = capsys.readouterr().out
+    assert "全部关系 1 条" in out and "邵杭" in out

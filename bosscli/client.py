@@ -294,7 +294,9 @@ class BossClient:
     BOSS_SEARCH_PATH = "/api/zpitem/boss/search"            # GetAdvancedSearchGeekListRequest — 牛人搜索
     BOSS_ADD_FRIEND_PATH = "/api/zpjob/chat/add/friend"     # BossCreateFriendRequest — 给牛人打招呼
     BOSS_ADD_FRIEND_AI_PATH = "/api/zprelation/friend/boss/add"  # fromAiRecommend variant (a.R2)
-    BOSS_CONTACTS_PATH = "/api/zprelation/friend/getBaseInfoList"  # 已沟通牛人（含 securityId/lid）
+    BOSS_CONTACTS_PATH = "/api/zprelation/friend/getBaseInfoList"  # 全部关系（88 条，无分页）
+    BOSS_CONTACT_LIST_PATH = "/api/zprelation/bossTag/contactList"  # 沟通列表：分页 + 服务端筛选
+    BOSS_CONTACT_FILTER_PATH = "/api/zprelation/bossTag/contactFilter"  # 可选筛选项/排序表
     BOSS_FRIEND_IDS_PATH = "/api/zprelation/friend/getFriendIdList"  # 会话对象 id 分桶
 
     # UserAccountBossBatchRequest, exactly as module/login/util/g.java:c builds it (16 subs).
@@ -358,8 +360,10 @@ class BossClient:
                         lid: str | None = None, from_: str | None = None,
                         entrance: int = 77, greet: str | None = None,
                         language_id: str | None = None, extra: dict | None = None) -> dict:
-        """BossCreateFriendRequest — GET /api/zpjob/chat/add/friend (key=secretKey). WRITE: 给牛人打招呼
-        / 发起沟通. Params mirror CreateFriendManager.g() (the boss branch):
+        """BossCreateFriendRequest — /api/zpjob/chat/add/friend wrapped in batchRunV2. WRITE: 给牛人打招呼
+        / 发起沟通. The path is BATCH-ONLY: a plain call answers 71 参数格式异常 no matter which sign key
+        is used, while the batch envelope parses fine (live: 110 当前账号状态异常 — account-level block).
+        Params mirror CreateFriendManager.g() (the boss branch):
           * securityId + lid come from the GEEK CARD (推荐牛人 card), not from my job
           * friendId / expectId describe the GEEK (card userId / expectId)
           * jobId is one of MY jobs (the card is served in that job's recommend feed)
@@ -372,13 +376,36 @@ class BossClient:
                   "entrance": str(entrance), "greet": greet, "languageId": language_id}
         if extra:
             params.update(extra)
-        return self.call_plain("GET", self.BOSS_ADD_FRIEND_PATH, params, key=self._secret())
+        return self.call_batch_v2([{"path": self.BOSS_ADD_FRIEND_PATH, "params": params}])
 
-    def boss_contacts(self) -> dict:
-        """zprelation.friend.getBaseInfoList — every geek this recruiter has a relation with.
-        Each card carries friendId / expectId / jobId / securityId / lid-less chatStatus, i.e. the
-        exact inputs `greet` and the IM session need. Verified live (88 contacts, identity=1)."""
+    def boss_contacts(self, page: int = 1, source: int = 2, encrypt_job_id: str | None = None,
+                      filter_params: dict | None = None, sort_type: int = 0) -> dict:
+        """BossGetContactGeekListRequest — zprelation.bossTag.contactList (paged, server-side filters).
+        Verified live: page/pageSize=10, total caps at 1000, hasMore drives paging; `source` 2 = 全部,
+        3 = 按职位 (needs encryptJobId), 1 = 未知的非法参数; `filter` is a JSON object keyed by the
+        paramNames advertised by contactFilter (geek-apply-status 701-704, chat-status 3|1|2);
+        `sortType` 0 = 按开始聊天时间倒序, 1 = 正序. Cards carry securityId/lid/geekId/expectId/jobId."""
+        params = {"page": str(page), "source": str(source), "sortType": str(sort_type),
+                  "filter": "" if not filter_params else
+                  json.dumps(filter_params, ensure_ascii=False, separators=(",", ":"))}
+        if encrypt_job_id:
+            params["encryptJobId"] = encrypt_job_id
+        return self.call_batch_v2([{"path": self.BOSS_CONTACT_LIST_PATH, "params": params}])
+
+    def boss_contacts_base(self) -> dict:
+        """zprelation.friend.getBaseInfoList — every relation (88 on the live account, unpaged).
+        Richer relation fields (chatStatus/waterLevel/isStar) but NO lid, unlike contactList."""
         return self.call_batch_v2([{"path": self.BOSS_CONTACTS_PATH}])
+
+    @staticmethod
+    def parse_contact_cards(resp: dict) -> list[dict]:
+        sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_CONTACT_LIST_PATH)
+        return ((sub.get("zpData") or {}).get("cardList")) or []
+
+    @staticmethod
+    def contact_page_meta(resp: dict) -> dict:
+        zd = (BossClient.batch_v2_sub(resp, BossClient.BOSS_CONTACT_LIST_PATH).get("zpData") or {})
+        return {"total": zd.get("total"), "hasMore": zd.get("hasMore")}
 
     @staticmethod
     def parse_boss_contacts(resp: dict) -> list[dict]:

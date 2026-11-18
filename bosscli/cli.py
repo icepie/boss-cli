@@ -477,33 +477,83 @@ def cmd_bossrcmd(args):
         print(json.dumps(sub, ensure_ascii=False, indent=2))
 
 
+APPLY_STATUS_CODES = {"随时到岗": "701", "暂不考虑": "702", "考虑机会": "703", "月内到岗": "704"}
+
+
+def _short(v, n: int = 14) -> str:
+    """securityId is ~600 chars of opaque ciphertext — show only its head in tables (--json has all)."""
+    s = "" if v is None else str(v)
+    return s if len(s) <= n else s[:n] + "…"
+WITHIN_CODES = {"7": "3", "30": "1", "90": "2"}       # chat-status: 开始沟通时间
+
+
 def cmd_boss_contacts(args):
-    """已沟通牛人（zprelation.friend.getBaseInfoList）：每张卡自带 greet / IM 需要的 id。"""
+    """沟通列表（zprelation.bossTag.contactList：分页 + 服务端筛选）或 --all 的全部关系（getBaseInfoList）。
+    卡片自带 securityId/lid/geekId/expectId，可直接喂 `boss greet`。"""
     client = _client(args)
-    resp = _run(client.boss_contacts)
-    if resp.get("code") not in (0, None):
-        _check_code(resp, "batchRunV2", client, side="boss")
-    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_CONTACTS_PATH)
-    _sub_check(sub, "contacts", client)
-    cards = BossClient.parse_boss_contacts(resp)
+    if args.all:
+        resp = _run(client.boss_contacts_base)
+        sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_CONTACTS_PATH)
+        _sub_check(sub, "contacts", client)
+        cards = BossClient.parse_boss_contacts(resp)
+        if args.json:
+            print(json.dumps(cards, ensure_ascii=False, indent=2)); return
+        zd = sub.get("zpData") or {}
+        print(f"# 全部关系 {len(cards)} 条（identity={zd.get('identity')} 置顶={zd.get('topCount')}）")
+        for ct in cards[:args.limit or len(cards)]:
+            print(f"- {ct.get('name','')} | {ct.get('expectPositionName','')} | {ct.get('expectSalary','')} | "
+                  f"chatStatus={ct.get('chatStatus')} | job={ct.get('jobName','')} | "
+                  f"friendId={ct.get('friendId')} securityId={_short(ct.get('securityId'))}")
+        return
+
+    encrypt_job_id = args.job
+    if args.source == 3 and not encrypt_job_id:
+        jobs = BossClient.parse_boss_jobs(_run(client.boss_jobs))
+        if not jobs:
+            sys.exit("[✗] source=3 需要 --job <encryptJobId>，而当前账号没有职位。")
+        encrypt_job_id = jobs[0]["encryptJobId"]
+        print(f"[i] 未给 --job，用第一个职位的 encryptJobId", file=sys.stderr)
+
+    filter_params = {}
+    if args.apply_status:
+        code = APPLY_STATUS_CODES.get(args.apply_status, args.apply_status)
+        filter_params["geek-apply-status"] = code
+    if args.within:
+        filter_params["chat-status"] = WITHIN_CODES.get(str(args.within), str(args.within))
+
+    pages = range(1, args.pages + 1)
+    seen, cards = set(), []
+    meta = {}
+    for page in pages:
+        resp = _run(lambda p=page: client.boss_contacts(
+            page=p, source=args.source, encrypt_job_id=encrypt_job_id,
+            filter_params=filter_params or None, sort_type=args.sort))
+        sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_CONTACT_LIST_PATH)
+        _sub_check(sub, "contact list", client)
+        batch = BossClient.parse_contact_cards(resp)
+        meta = BossClient.contact_page_meta(resp)
+        new = 0
+        for ct in batch:
+            key = ct.get("geekId") or ct.get("securityId")
+            if key in seen:
+                continue
+            seen.add(key); cards.append(ct); new += 1
+        if not meta.get("hasMore") or not new:
+            break
+        if len(pages) > 1:
+            time.sleep(0.4)
+
     if args.json:
         print(json.dumps(cards, ensure_ascii=False, indent=2)); return
-    zd = sub.get("zpData") or {}
-    print(f"# 已沟通牛人 {len(cards)} 个（identity={zd.get('identity')} 置顶={zd.get('topCount')}）")
-    shown = 0
+    flt = ""
+    if filter_params:
+        flt = " filter=" + json.dumps(filter_params, ensure_ascii=False)
+    print(f"# 沟通列表 {len(cards)} 条（source={args.source}{flt} total={meta.get('total')}）")
     for ct in cards:
-        if args.star and not ct.get("isStar"):
-            continue
-        if args.chat_status is not None and str(ct.get("chatStatus")) != str(args.chat_status):
-            continue
-        print(f"- {ct.get('name','')} | {ct.get('expectPositionName','')} | {ct.get('expectSalary','')} | "
-              f"{ct.get('degree','')} | chatStatus={ct.get('chatStatus')} | job={ct.get('jobName','')} | "
-              f"friendId={ct.get('friendId')} securityId={ct.get('securityId')}")
-        shown += 1
-        if args.limit and shown >= args.limit:
-            break
-    if args.limit is None and len(cards) > 20:
-        print(f"… 共 {len(cards)} 条，用 --limit 收窄或 --json 取全量")
+        print(f"- {ct.get('geekName','')} | {ct.get('expectPositionName','')} | {ct.get('salary','')} | "
+              f"{ct.get('geekDegree','')} | {ct.get('applyStatusDesc','')} | "
+              f"聊天卡={ct.get('chatCardCount')} | {ct.get('actionDateDesc','')} | "
+              f"geekId={ct.get('geekId')} lid={ct.get('lid')} securityId={_short(ct.get('securityId'))}")
 
 
 def cmd_boss_greet(args):
@@ -533,11 +583,13 @@ def cmd_boss_greet(args):
         lid=args.lid, from_=args.from_, entrance=args.entrance, greet=args.greet,
         language_id=args.language_id))
     _check_code(resp, "boss greet", client, side="boss")
-    rel = (resp.get("zpData") or {}).get("relation") or {}
-    print(f"[✓] 招呼已发出 · {resp.get('message') or 'ok'}"
+    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_ADD_FRIEND_PATH)
+    _sub_check(sub, "boss greet", client)
+    rel = (sub.get("zpData") or {}).get("relation") or {}
+    print(f"[✓] 招呼已发出 · {sub.get('message') or 'ok'}"
           + (f" · 已与 {rel.get('name')} 建立会话" if rel else ""))
     if args.json:
-        print(json.dumps(resp, ensure_ascii=False, indent=2))
+        print(json.dumps(sub, ensure_ascii=False, indent=2))
 
 
 def cmd_api(args):
@@ -762,10 +814,16 @@ def main(argv=None):
     rp.add_argument("--token", help="override t2 auth token")
     rp.set_defaults(func=cmd_bossrcmd)
 
-    ctp = sub.add_parser("contacts", help="(招聘端) 已沟通牛人列表（含 greet 需要的 securityId/friendId）")
-    ctp.add_argument("--limit", type=int, help="只显示前 N 条")
-    ctp.add_argument("--star", action="store_true", help="只看星标")
-    ctp.add_argument("--chat-status", help="只看某个 chatStatus 值")
+    ctp = sub.add_parser("contacts", help="(招聘端) 沟通列表（分页+服务端筛选；卡片含 greet 所需 id）")
+    ctp.add_argument("--page", type=int, default=1, help="起始页（每页 10 条）")
+    ctp.add_argument("--pages", type=int, default=1, help="连续抓几页（去重）")
+    ctp.add_argument("--source", type=int, default=2, help="2=全部（默认），3=按职位（需 --job）")
+    ctp.add_argument("--job", help="encryptJobId（source=3 用；默认取第一个职位）")
+    ctp.add_argument("--sort", type=int, default=0, help="0=按开始聊天时间倒序（默认），1=正序")
+    ctp.add_argument("--apply-status", help="求职状态：701/随时到岗 · 702/暂不考虑 · 703/考虑机会 · 704/月内到岗")
+    ctp.add_argument("--within", help="开始沟通时间：7 / 30 / 90（天）")
+    ctp.add_argument("--all", action="store_true", help="改用 getBaseInfoList：全部关系（88 条，含 chatStatus）")
+    ctp.add_argument("--limit", type=int, help="--all 模式下只显示前 N 条")
     ctp.add_argument("--json", action="store_true")
     ctp.add_argument("--token", help="override t2 auth token")
     ctp.set_defaults(func=cmd_boss_contacts)
