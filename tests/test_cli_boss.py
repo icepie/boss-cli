@@ -295,3 +295,50 @@ def test_history_download_lists_message_files(monkeypatch, capsys, tmp_path):
     assert "消息内文件 1 个" in out and "已保存 1 个文件" in out
     files = list(tmp_path.iterdir())
     assert len(files) == 1 and files[0].suffix == ".png" and files[0].read_bytes() == b"PNGDATA"
+
+
+def _history_fake(pages):
+    calls = []
+    fake = Fake()
+
+    def hist(friend_id, **kw):
+        calls.append(kw.get("max_msg_id"))
+        idx = min(len(calls) - 1, len(pages) - 1)
+        return _sub(BossClient.BOSS_HISTORY_PATH, pages[idx])
+
+    fake.boss_history = hist
+    return fake, calls
+
+
+def test_history_all_pages_backwards_and_dedupes(monkeypatch, capsys):
+    fake, calls = _history_fake([
+        {"code": 0, "zpData": {"hasMore": True, "minMsgId": 100, "messages": ["A", "B"]}},
+        {"code": 0, "zpData": {"hasMore": False, "minMsgId": 50, "messages": ["B", "C"]}},
+    ])
+    _run(monkeypatch, fake, ["history", "42", "--all", "--count", "2", "--raw"])
+    out = capsys.readouterr().out
+    assert "聊天记录 3 条" in out          # A,B + C (B deduped)
+    assert "page=2" in out and "hasMore=False" in out
+    assert calls == [0, 100]              # second page asked for messages before minMsgId
+
+
+def test_history_all_respects_max_pages(monkeypatch, capsys):
+    fake, calls = _history_fake([
+        {"code": 0, "zpData": {"hasMore": True, "minMsgId": 90, "messages": ["A"]}},
+        {"code": 0, "zpData": {"hasMore": True, "minMsgId": 80, "messages": ["B"]}},
+        {"code": 0, "zpData": {"hasMore": True, "minMsgId": 70, "messages": ["C"]}},
+    ])
+    _run(monkeypatch, fake, ["history", "42", "--all", "--max-pages", "2", "--raw"])
+    out, err = capsys.readouterr()
+    assert len(calls) == 2 and "page=2" in out
+    assert "max-pages=2" in err           # warns that older messages were left
+
+
+def test_history_single_page_ignores_paging(monkeypatch, capsys):
+    fake, calls = _history_fake([
+        {"code": 0, "zpData": {"hasMore": True, "minMsgId": 100, "messages": ["A"]}},
+        {"code": 0, "zpData": {"hasMore": False, "minMsgId": 1, "messages": ["B"]}},
+    ])
+    _run(monkeypatch, fake, ["history", "42", "--raw"])
+    assert len(calls) == 1
+    assert "page=1" in capsys.readouterr().out

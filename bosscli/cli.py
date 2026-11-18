@@ -664,18 +664,52 @@ def _download_urls(client, urls: list[str], outdir: str) -> list[str]:
     return saved
 
 
+MAX_HISTORY_PAGES = 20   # safety cap for --all: 20 × --count messages, never an unbounded crawl
+
+
+def _history_pages(client, args) -> dict:
+    """One page, or --all paging backwards via maxMsgId=minMsgId until hasMore is false.
+    Messages are opaque base64 blobs, so pages are deduped by their hash."""
+    import hashlib
+    msgs, seen = [], set()
+    has_more, min_id, page = True, 0, 0
+    while True:
+        page += 1
+        resp = _run(lambda mid=min_id: client.boss_history(
+            args.friend_id, security_id=args.security_id, friend_source=args.friend_source,
+            count=args.count, max_msg_id=mid))
+        _check_code(resp, "batchRunV2", client, side="boss")
+        sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_HISTORY_PATH)
+        _sub_check(sub, "history", client)
+        hist = BossClient.parse_history(resp)
+        new = 0
+        for blob in hist["messages"]:
+            key = hashlib.sha1(blob.encode()).hexdigest()
+            if key in seen:
+                continue
+            seen.add(key)
+            msgs.append(blob)
+            new += 1
+        has_more = bool(hist.get("hasMore"))
+        min_id = hist.get("minMsgId") or 0
+        if not args.all or not has_more or not min_id or not new:
+            break
+        if page >= args.max_pages:
+            print(f"[i] 已达 --max-pages={args.max_pages}，可能还有更早的消息", file=sys.stderr)
+            break
+        time.sleep(0.4)           # be polite between pages
+    return {"messages": msgs, "hasMore": has_more, "minMsgId": min_id, "pages": page}
+
+
 def cmd_boss_history(args):
-    """聊天历史（HistoryChatRequest → batchRunV2）。消息是 IM protobuf，--text 尽力抽取可见文本。"""
+    """聊天历史（HistoryChatRequest → batchRunV2）。消息是 IM protobuf，--text 尽力抽取可见文本。
+    --all 用 minMsgId 往前翻页，直到没有更早的消息（受 --max-pages 保护）。"""
     client = _client(args)
-    resp = _run(lambda: client.boss_history(args.friend_id, security_id=args.security_id,
-                                            friend_source=args.friend_source, count=args.count))
-    _check_code(resp, "batchRunV2", client, side="boss")
-    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_HISTORY_PATH)
-    _sub_check(sub, "history", client)
-    hist = BossClient.parse_history(resp)
+    hist = _history_pages(client, args)
     if args.json:
         print(json.dumps(hist, ensure_ascii=False, indent=2)); return
-    print(f"# 聊天记录 {len(hist['messages'])} 条（hasMore={hist['hasMore']} minMsgId={hist['minMsgId']}）")
+    print(f"# 聊天记录 {len(hist['messages'])} 条"
+          f"（page={hist['pages']} hasMore={hist['hasMore']} minMsgId={hist['minMsgId']}）")
     if args.download:
         urls = [u for blob in hist["messages"] for u in _im_urls(blob)]
         print(f"# 消息内文件 {len(dict.fromkeys(urls))} 个 -> {args.download}")
@@ -970,7 +1004,10 @@ def main(argv=None):
     hsp.add_argument("friend_id", help="牛人 geekId/friendId（contacts 卡片）")
     hsp.add_argument("--security-id", help="同一张卡片的 securityId（服务端用于鉴权）")
     hsp.add_argument("--friend-source", type=int, default=0)
-    hsp.add_argument("--count", type=int, default=20, help="拉取条数（默认 20）")
+    hsp.add_argument("--count", type=int, default=20, help="每页条数（默认 20）")
+    hsp.add_argument("--all", action="store_true", help="往前翻页直到没有更早的消息")
+    hsp.add_argument("--max-pages", type=int, default=MAX_HISTORY_PAGES,
+                     help=f"--all 的页数上限（默认 {MAX_HISTORY_PAGES}）")
     hsp.add_argument("--text", action="store_true", help="尽力抽取消息可见文本（protobuf 无 schema）")
     hsp.add_argument("--raw", action="store_true", help="只列条数，不抽取文本")
     hsp.add_argument("--download", metavar="DIR",

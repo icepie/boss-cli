@@ -165,7 +165,8 @@ boss contacts --source 3 --job <encryptJobId>            # per-job list
 boss contacts --all --limit 10   # every relation (getBaseInfoList: chatStatus/waterLevel, no lid)
 boss resume <securityId>         # 牛人简历: 期望 / 工作 / 教育 / 项目（batchRunV2）
 boss history <geekId> --security-id <sid> --text   # 与该牛人的聊天记录（IM protobuf 文本尽力抽取）
-boss history <geekId> --security-id <sid> --download ./files   # 下载消息里的图片/文件（CDN 直链，无需登录）
+boss history <geekId> --security-id <sid> --all --text         # 往前翻页拉全部历史（--max-pages 限流）
+boss history <geekId> --security-id <sid> --all --download ./files   # 下载全部历史里的图片/文件
 boss rcmd <jobId>                # 推荐牛人 for one of my jobs (needs an ONLINE job)
 boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
 
@@ -382,7 +383,8 @@ boss contacts --source 3 --job <encryptJobId>            # 按职位看
 boss contacts --all --limit 10   # 全部关系（getBaseInfoList：chatStatus/waterLevel，但没有 lid）
 boss resume <securityId>         # 牛人简历：期望 / 工作 / 教育 / 项目（batchRunV2）
 boss history <geekId> --security-id <sid> --text   # 与该牛人的聊天记录（IM protobuf，尽力抽文本）
-boss history <geekId> --security-id <sid> --download ./files   # 下载消息里的图片/文件（CDN 直链，无需登录）
+boss history <geekId> --security-id <sid> --all --text         # 往前翻页拉全部历史（--max-pages 限流）
+boss history <geekId> --security-id <sid> --all --download ./files   # 下载全部历史里的图片/文件
 boss rcmd <jobId>                # 某职位的推荐牛人（职位需在线）
 boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
 
