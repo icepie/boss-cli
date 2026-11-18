@@ -159,6 +159,7 @@ the dotted method names (`zpjob.job.local.data`, `zpboss.app.boss.get.detail`, �
 boss me                          # 招聘端 identity: company / boss name / activity
 boss me --json                   # raw zpboss.app.boss.get.detail subresponse
 boss jobs                        # my posted jobs (jobId / raw status codes / encryptJobId)
+boss contacts --limit 10         # geeks I already talked to (carries securityId/friendId/chatStatus)
 boss rcmd <jobId>                # 推荐牛人 for one of my jobs (needs an ONLINE job)
 boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
 
@@ -367,6 +368,7 @@ boss chat <securityId> --friend-id <userId> --job-id <jobId> --lid <lid> --confi
 boss me                          # 招聘端身份：公司 / boss 名字 / 活跃状态
 boss me --json                   # zpboss.app.boss.get.detail 原始子响应
 boss jobs                        # 我发布的职位（jobId / 原始状态码 / encryptJobId）
+boss contacts --limit 10         # 已沟通牛人（自带 securityId/friendId/chatStatus，可直接喂 greet）
 boss rcmd <jobId>                # 某职位的推荐牛人（职位需在线）
 boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
 

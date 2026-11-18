@@ -23,6 +23,7 @@ class Fake:
         self.subs = None
 
     def boss_jobs(self, **kw): return self.resp
+    def boss_contacts(self, **kw): return self.resp
     def boss_account(self, full=False): return self.resp
     def boss_recommend_geeks(self, job_id, **kw): self.kw = dict(kw, job_id=job_id); return self.resp
     def search(self, *a, **kw): return self.resp
@@ -184,3 +185,19 @@ def test_greet_param_error_on_correct_side_has_no_identity_hint(monkeypatch, cap
     assert e.value.code == 2
     err = capsys.readouterr().err
     assert "code=71" in err and "另一侧接口" not in err
+
+
+def test_contacts_renders_cards_with_limit(monkeypatch, capsys):
+    cards = [
+        {"name": "邵杭", "expectPositionName": "数据标注", "expectSalary": "10-12K", "degree": "本科",
+         "chatStatus": 0, "jobName": "AI产品开发助理", "friendId": 635638207, "securityId": "S1"},
+        {"name": "周辰", "expectPositionName": "大模型算法", "expectSalary": "5-8K", "degree": "本科",
+         "chatStatus": 0, "jobName": "AI产品开发助理", "friendId": 576846713, "securityId": "S2"},
+    ]
+    fake = Fake(_sub(BossClient.BOSS_CONTACTS_PATH,
+                     {"code": 0, "zpData": {"identity": 1, "topCount": 2, "baseInfoList": cards}}))
+    _run(monkeypatch, fake, ["contacts", "--limit", "1"])
+    out = capsys.readouterr().out
+    assert "已沟通牛人 2 个" in out
+    assert "邵杭" in out and "securityId=S1" in out
+    assert "周辰" not in out          # --limit applied

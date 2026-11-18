@@ -477,6 +477,35 @@ def cmd_bossrcmd(args):
         print(json.dumps(sub, ensure_ascii=False, indent=2))
 
 
+def cmd_boss_contacts(args):
+    """已沟通牛人（zprelation.friend.getBaseInfoList）：每张卡自带 greet / IM 需要的 id。"""
+    client = _client(args)
+    resp = _run(client.boss_contacts)
+    if resp.get("code") not in (0, None):
+        _check_code(resp, "batchRunV2", client, side="boss")
+    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_CONTACTS_PATH)
+    _sub_check(sub, "contacts", client)
+    cards = BossClient.parse_boss_contacts(resp)
+    if args.json:
+        print(json.dumps(cards, ensure_ascii=False, indent=2)); return
+    zd = sub.get("zpData") or {}
+    print(f"# 已沟通牛人 {len(cards)} 个（identity={zd.get('identity')} 置顶={zd.get('topCount')}）")
+    shown = 0
+    for ct in cards:
+        if args.star and not ct.get("isStar"):
+            continue
+        if args.chat_status is not None and str(ct.get("chatStatus")) != str(args.chat_status):
+            continue
+        print(f"- {ct.get('name','')} | {ct.get('expectPositionName','')} | {ct.get('expectSalary','')} | "
+              f"{ct.get('degree','')} | chatStatus={ct.get('chatStatus')} | job={ct.get('jobName','')} | "
+              f"friendId={ct.get('friendId')} securityId={ct.get('securityId')}")
+        shown += 1
+        if args.limit and shown >= args.limit:
+            break
+    if args.limit is None and len(cards) > 20:
+        print(f"… 共 {len(cards)} 条，用 --limit 收窄或 --json 取全量")
+
+
 def cmd_boss_greet(args):
     """WRITE — 招聘端给牛人打招呼 (BossCreateFriendRequest). securityId/lid/friend-id/expect-id 都来自
     `boss rcmd <jobId> --json` 的推荐卡；dry-run by default, --confirm actually sends."""
@@ -732,6 +761,14 @@ def main(argv=None):
     rp.add_argument("--json", action="store_true")
     rp.add_argument("--token", help="override t2 auth token")
     rp.set_defaults(func=cmd_bossrcmd)
+
+    ctp = sub.add_parser("contacts", help="(招聘端) 已沟通牛人列表（含 greet 需要的 securityId/friendId）")
+    ctp.add_argument("--limit", type=int, help="只显示前 N 条")
+    ctp.add_argument("--star", action="store_true", help="只看星标")
+    ctp.add_argument("--chat-status", help="只看某个 chatStatus 值")
+    ctp.add_argument("--json", action="store_true")
+    ctp.add_argument("--token", help="override t2 auth token")
+    ctp.set_defaults(func=cmd_boss_contacts)
 
     gp = sub.add_parser("greet", help="(招聘端) 给牛人打招呼（写操作，dry-run 除非 --confirm）")
     gp.add_argument("security_id", help="牛人卡片的 securityId（来自 `boss rcmd --json`）")

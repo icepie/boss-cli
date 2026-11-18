@@ -294,6 +294,8 @@ class BossClient:
     BOSS_SEARCH_PATH = "/api/zpitem/boss/search"            # GetAdvancedSearchGeekListRequest — 牛人搜索
     BOSS_ADD_FRIEND_PATH = "/api/zpjob/chat/add/friend"     # BossCreateFriendRequest — 给牛人打招呼
     BOSS_ADD_FRIEND_AI_PATH = "/api/zprelation/friend/boss/add"  # fromAiRecommend variant (a.R2)
+    BOSS_CONTACTS_PATH = "/api/zprelation/friend/getBaseInfoList"  # 已沟通牛人（含 securityId/lid）
+    BOSS_FRIEND_IDS_PATH = "/api/zprelation/friend/getFriendIdList"  # 会话对象 id 分桶
 
     # UserAccountBossBatchRequest, exactly as module/login/util/g.java:c builds it (16 subs).
     BOSS_ACCOUNT_SUBS = [
@@ -371,6 +373,17 @@ class BossClient:
         if extra:
             params.update(extra)
         return self.call_plain("GET", self.BOSS_ADD_FRIEND_PATH, params, key=self._secret())
+
+    def boss_contacts(self) -> dict:
+        """zprelation.friend.getBaseInfoList — every geek this recruiter has a relation with.
+        Each card carries friendId / expectId / jobId / securityId / lid-less chatStatus, i.e. the
+        exact inputs `greet` and the IM session need. Verified live (88 contacts, identity=1)."""
+        return self.call_batch_v2([{"path": self.BOSS_CONTACTS_PATH}])
+
+    @staticmethod
+    def parse_boss_contacts(resp: dict) -> list[dict]:
+        sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_CONTACTS_PATH)
+        return ((sub.get("zpData") or {}).get("baseInfoList")) or []
 
     @staticmethod
     def parse_boss_jobs(resp: dict) -> list[dict]:
