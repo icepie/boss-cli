@@ -189,6 +189,17 @@ account-state answers, not signing failures. `greet` therefore cannot be verifie
 with no online job (no geek card ⇒ no `securityId` to greet): its param set and signing are pinned by
 offline tests instead.
 
+### Sending chat messages — blocked (measured, not guessed)
+
+Recruiter chat runs inside the IM kernel (MQTT/TLS + protobuf). `/api/zpchat/message/send` exists as a
+path constant but has no request class in the decompiled sources, and probing it answers
+`17 缺少必要参数` for every plausible param set (`friendId`/`uid`/`toId` × `text`/`content`/`msgType` …);
+`/api/zpchat/uToken/update` (the MQTT credentials) behaves the same. Re-signing the APK to inject a
+frida gadget does **not** work either: the original install reaches the privacy dialog, while both a
+gadget build and a build with the gadget load disabled (same re-signature) hang on the splash screen —
+BOSS verifies the APK signature at startup. Remaining routes are rooting the device (run `rusda-server`
+in place, no repack) or driving the web app's own HTTP API.
+
 ### MCP server
 
 ```bash
@@ -405,6 +416,14 @@ boss api --secret /api/<不在白名单的普通路径> k=v      # 用 secretKey
 答复，不是加签失败。用真实卡片（`boss contacts --json` 的 securityId/lid/geekId/expectId）实发 `greet`
 返回 `110 当前账号状态异常，暂不支持此操作` —— 同样是账号级限制。要点：`greet` **只能走 batchRunV2**
 （plain 调用无论用哪个 key 都返回 `71 参数格式异常`），批内参数能被正确解析，账号可用后链路即生效。
+
+### 发消息：目前不可用（实测结论）
+
+招聘端聊天跑在 IM kernel 里（MQTT/TLS + protobuf）。`/api/zpchat/message/send` 只是路径常量，反编译源码里
+没有对应请求类；实测用 `friendId`/`uid`/`toId` × `text`/`content`/`msgType` 等 8 组参数探测，全部返回
+`17 缺少必要参数`；`/api/zpchat/uToken/update`（MQTT 凭证）同样。重签 APK 注入 frida gadget 也不行：
+原版安装能到隐私协议页，而 gadget 版和"禁用 gadget 加载"版（同样重签）都卡在闪屏 —— BOSS 启动时会校验
+APK 签名。剩下的路只有两条：root 设备（原地跑 `rusda-server`，不重打包）或走网页版自己的 HTTP 接口。
 
 ### MCP 服务
 
