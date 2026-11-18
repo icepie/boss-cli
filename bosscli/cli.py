@@ -1,4 +1,4 @@
-"""boss-cli entry point.  Usage: boss {search|filters|login|whoami|detail} ... [opts]
+"""boss-cli entry point.  Usage: boss {search|filters|login|whoami|detail|cities|chat|me|jobs|rcmd|api} ... [opts]
 (or `python -m bosscli.cli ...` without installing)."""
 from __future__ import annotations
 import argparse, json, os, sys, time
@@ -314,6 +314,121 @@ def cmd_chat(args):
         print(json.dumps(resp, ensure_ascii=False, indent=2))
 
 
+def _sub_check(sub: dict, what: str):
+    """Validate a batchRunV2 subresponse's inner code (outer envelope is already code 0 here)."""
+    if (sub.get("code") or 0) not in (0, None):
+        print(f"[!] {what}: code={sub.get('code')} {sub.get('message')}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _boss_subs_text(resp: dict, paths: list[tuple[str, str]]):
+    """Print (label, path) subs as `label -> code message` lines, for quick health checks."""
+    for label, path in paths:
+        sub = BossClient.batch_v2_sub(resp, path)
+        print(f"  {label}: code={sub.get('code')} {sub.get('message')}")
+
+
+def cmd_bossme(args):
+    """Recruiter identity: company + boss profile (UserAccountBossBatchRequest detail sub)."""
+    client = _client(args)
+    resp = _run(client.boss_account)
+    if resp.get("code") not in (0, None):
+        _check_code(resp, "batchRunV2")
+    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_DETAIL_PATH)
+    _sub_check(sub, "boss detail")
+    if args.json:
+        print(json.dumps(sub, ensure_ascii=False, indent=2)); return
+    ud = sub.get("zpData") or {}
+    det = ud.get("userDetail") or {}
+    extra = det.get("userExtra") or {}
+    info = det.get("userInfo") or {}
+    scale = extra.get("scaleCategory") or extra.get("scale")
+    if isinstance(scale, dict):
+        scale = scale.get("name") or scale.get("scaleName") or ""
+    print(f"# 招聘端身份 · {extra.get('comName') or extra.get('companyName') or '(公司)'}"
+          f"  name={info.get('name','')}  userId={info.get('userId')}")
+    print(f"  identityType={extra.get('identityType')}  active={det.get('activeTimeDesc') or ''}")
+    print(f"  行业: {extra.get('industryCategory','')}  规模: {scale or ''}"
+          f"  公司全称: {extra.get('companyFullName','')}")
+    print(f"  今日面试={ud.get('interviewTodayTime')}  待评价={ud.get('interviewNotCommentCount')}"
+          f"  可聊牛人={ud.get('canShareGeek')}")
+
+
+def cmd_bossjobs(args):
+    """My posted jobs (zpjob.job.local.data). jobId here is what boss rcmd/search take."""
+    client = _client(args)
+    resp = _run(client.boss_jobs)
+    if resp.get("code") not in (0, None):
+        _check_code(resp, "batchRunV2")
+    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_JOB_LIST_PATH)
+    _sub_check(sub, "job list")
+    jobs = BossClient.parse_boss_jobs(resp)
+    if args.json:
+        print(json.dumps(jobs, ensure_ascii=False, indent=2)); return
+    print(f"# 我的职位 {len(jobs)} 个 (jobStatus/jobAuditStatus 为服务端原始码)")
+    for j in jobs:
+        print(f"- {j.get('jobId')} | {j.get('positionName')} | {j.get('salaryDesc')} | "
+              f"status={j.get('jobStatus')}/audit={j.get('jobAuditStatus')} | "
+              f"{j.get('experienceName','')} {j.get('degreeName','')} | "
+              f"encryptJobId={j.get('encryptJobId')}")
+    if jobs:
+        print("\n下一步: boss rcmd <jobId>   # 该职位的推荐牛人（职位需在线，否则 code 200001）")
+
+
+def cmd_bossrcmd(args):
+    """推荐牛人 for one of my jobs (BossF1GetGeekListRequest via batchRunV2)."""
+    client = _client(args)
+    fp = None
+    if args.filter_params:
+        fp = args.filter_params
+    resp = _run(lambda: client.boss_recommend_geeks(
+        args.job_id, page=args.page, page_size=args.page_size,
+        sort_type=args.sort_type, filter_params=fp))
+    if resp.get("code") not in (0, None):
+        _check_code(resp, "batchRunV2")
+    sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_RCMD_PATH)
+    if args.json:
+        print(json.dumps(sub, ensure_ascii=False, indent=2)); return
+    if sub.get("code") not in (0, None):
+        print(f"[!] 推荐牛人: code={sub.get('code')} {sub.get('message')}", file=sys.stderr)
+        if str(sub.get("code")) == "200001":
+            print("    [i] 该职位当前不在线；用 `boss jobs` 换一个在线职位。", file=sys.stderr)
+        sys.exit(2)
+    zd = sub.get("zpData") or {}
+    shown = 0
+    for name in ("geekList", "geekCardList", "cardList", "list"):
+        cards = zd.get(name)
+        if isinstance(cards, list) and cards:
+            print(f"# 推荐牛人 {len(cards)} 条 (page={args.page})")
+            for g in cards:
+                print(f"- {g.get('name') or g.get('geekName','')} | {g.get('positionName','')} | "
+                      f"{g.get('salaryDesc','')} | {g.get('geekWorkYear','')} {g.get('geekDegree','')} | "
+                      f"securityId={g.get('securityId')}")
+            shown = len(cards)
+            break
+    if not shown:
+        print(f"# 推荐牛人: 无列表字段；zpData keys={list(zd)[:12]}")
+        print(json.dumps(sub, ensure_ascii=False, indent=2))
+
+
+def cmd_api(args):
+    """Generic escape hatch: call any endpoint. Most recruiter paths must be wrapped in
+    batchRunV2 (--batch); whitelisted paths (cities/search/…) work plain and need no --secret."""
+    client = _client(args)
+    params = {}
+    for item in args.param or []:
+        if "=" not in item:
+            sys.exit(f"参数需形如 KEY=VALUE，收到: {item!r}")
+        k, v = item.split("=", 1)
+        params[k] = v
+    key = client._secret() if args.secret else None
+    if args.batch:
+        resp = _run(lambda: client.call_batch_v2([{"path": args.path, "params": params}], key=key))
+    else:
+        resp = _run(lambda: client.call_plain("GET", args.path, params, key=key))
+    print(json.dumps(resp, ensure_ascii=False, indent=2))
+
+
 def _auto_solve_captcha(lc, args):
     """--solve: solve whatever captcha man/machine demands and populate args.validate (+
     challenge/seccode for Geetest). Routes by captchaType:
@@ -495,6 +610,34 @@ def main(argv=None):
     hp.add_argument("--json", action="store_true")
     hp.add_argument("--token", help="override t2 auth token")
     hp.set_defaults(func=cmd_chat)
+
+    mep = sub.add_parser("me", help="(招聘端) 我的 boss 身份/公司 (batchRunV2 zpboss.app.boss.get.detail)")
+    mep.add_argument("--json", action="store_true")
+    mep.add_argument("--token", help="override t2 auth token")
+    mep.set_defaults(func=cmd_bossme)
+
+    jp = sub.add_parser("jobs", help="(招聘端) 我发布的职位 (jobId 供 rcmd 使用)")
+    jp.add_argument("--json", action="store_true")
+    jp.add_argument("--token", help="override t2 auth token")
+    jp.set_defaults(func=cmd_bossjobs)
+
+    rp = sub.add_parser("rcmd", help="(招聘端) 某职位的推荐牛人 (需在线职位)")
+    rp.add_argument("job_id", help="jobId from `boss jobs`")
+    rp.add_argument("--page", type=int, default=1)
+    rp.add_argument("--page-size", type=int, default=15)
+    rp.add_argument("--sort-type", type=int, default=0)
+    rp.add_argument("--filter-params", help="raw filterParams (JSON string) passthrough")
+    rp.add_argument("--json", action="store_true")
+    rp.add_argument("--token", help="override t2 auth token")
+    rp.set_defaults(func=cmd_bossrcmd)
+
+    rp2 = sub.add_parser("api", help="原始调用任意接口（招聘端多数要用 --batch 包 batchRunV2）")
+    rp2.add_argument("path", help="e.g. /api/zpitem/boss/search")
+    rp2.add_argument("param", nargs="*", metavar="KEY=VAL", help="query params")
+    rp2.add_argument("--batch", action="store_true", help="wrap in /api/batch/batchRunV2")
+    rp2.add_argument("--secret", action="store_true", help="sign with secretKey (non-whitelisted plain paths)")
+    rp2.add_argument("--token", help="override t2 auth token")
+    rp2.set_defaults(func=cmd_api)
 
     lp = sub.add_parser("login", help="SMS-code login -> obtain t2 into the session file")
     lp.add_argument("--phone", required=True, help="mobile number (without region code)")

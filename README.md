@@ -140,6 +140,31 @@ account `secretKey` (they're not on BOSS's no-key whitelist), while `cities` is 
 signs key-less like search. `boss chat` is a **write** action — it messages a boss on your behalf,
 so it never sends without `--confirm`.
 
+### Recruiter (boss identity) side — `batchRunV2`
+
+The recruiter app never calls its own paths standalone: they are aggregated into
+`GET /api/batch/batchRunV2?batch_method_feed=["method=<dotted.path>&k=v", …]` — each subrequest is
+one quoted `method=…` string (params Java-URLEncoder'd inside it, entries joined with `", "`). That
+outer path is on the no-`secretKey` whitelist, so the batch signs key-less even though the inner
+paths are not whitelisted. `call_batch_v2()` reproduces the envelope; responses come back keyed by
+the dotted method names (`zpjob.job.local.data`, `zpboss.app.boss.get.detail`, …).
+
+```bash
+boss me                          # 招聘端 identity: company / boss name / activity
+boss me --json                   # raw zpboss.app.boss.get.detail subresponse
+boss jobs                        # my posted jobs (jobId / raw status codes / encryptJobId)
+boss rcmd <jobId>                # 推荐牛人 for one of my jobs (needs an ONLINE job)
+boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
+
+# any other endpoint: --batch wraps it in batchRunV2 (most recruiter paths need this)
+boss api --batch /api/zpitem/boss/search 'filterParams={"query":"Python"}' page=1 pageSize=15
+boss api --secret /api/<non-whitelisted-plain-path> k=v   # plain call signed with secretKey
+```
+
+Verified live against a real recruiter session: `me` and `jobs` (plus the profile / job-sort subs of
+the account batch) answer code 0. `rcmd` answers inner `200001 当前职位不在线` when the jobId is not
+an online posting of the account — that is the server's account-state answer, not a signing failure.
+
 ### MCP server
 
 ```bash
@@ -168,7 +193,7 @@ python tests/test_signer.py     # request assembly round-trip
 ```
 bosscli/yzwg.py     signing / encryption primitives (pure Python)
 bosscli/signer.py   request assembly (batch + plain branches)
-bosscli/client.py   search + read/write endpoints (whoami/detail/cities/chat) + signed-call core
+bosscli/client.py   signed-call core + search + geek read/write endpoints + recruiter (batchRunV2)
 bosscli/login.py    off-device SMS-code login (man/machine → smsCode → codeLogin → t2)
 bosscli/smsbackend.py  pluggable SMS-code source for login (manual / env / http / custom)
 bosscli/localenv.py    loads a gitignored .env (CAPSOLVER_KEY / CHAOJIYING_* / BOSS_SMS_*) at startup
@@ -315,6 +340,30 @@ boss chat <securityId> --friend-id <userId> --job-id <jobId> --lid <lid> --confi
 这些接口复用与 search/login 完全相同的加签：`whoami` / `detail` / `chat` 不在 BOSS 的免 key 白名单上，
 用账号 `secretKey` 加签；`cities` 在白名单里，和 search 一样免 key。`boss chat` 是**写**操作
 （以你名义给 boss 发消息），因此不加 `--confirm` 绝不发送。
+
+### 招聘端（boss 身份）—— `batchRunV2`
+
+招聘端 App 从不单独调用自己的接口：它们被聚合进
+`GET /api/batch/batchRunV2?batch_method_feed=["method=<点号路径>&k=v", …]` —— 每个子请求是一条带引号的
+`method=…` 字符串（内部参数再 Java-URLEncoder 一次，条目之间用 `", "` 连接）。外层路径在免 `secretKey`
+白名单里，所以整个批次免 key 加签，哪怕内层路径不在白名单。`call_batch_v2()` 复现了这个封装；响应按点号
+方法名取（`zpjob.job.local.data`、`zpboss.app.boss.get.detail` …）。
+
+```bash
+boss me                          # 招聘端身份：公司 / boss 名字 / 活跃状态
+boss me --json                   # zpboss.app.boss.get.detail 原始子响应
+boss jobs                        # 我发布的职位（jobId / 原始状态码 / encryptJobId）
+boss rcmd <jobId>                # 某职位的推荐牛人（职位需在线）
+boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
+
+# 任意其它接口：--batch 会包进 batchRunV2（多数招聘端路径都需要）
+boss api --batch /api/zpitem/boss/search 'filterParams={"query":"Python"}' page=1 pageSize=15
+boss api --secret /api/<不在白名单的普通路径> k=v      # 用 secretKey 加签的普通调用
+```
+
+已用真实招聘端 session 实测：`me`、`jobs`（以及账户批次里的 profile / 职位排序子请求）都返回 code 0。
+当 jobId 不是该账号在线职位时，`rcmd` 内层返回 `200001 当前职位不在线` —— 这是服务端对账号状态的答复，
+不是加签失败。
 
 ### MCP 服务
 

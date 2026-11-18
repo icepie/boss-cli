@@ -18,6 +18,7 @@ from . import yzwg, signer
 
 HOST = "https://api5.zhipin.com"
 BATCH_PATH = "/api/batch/requests"
+BATCH_V2_PATH = "/api/batch/batchRunV2"
 CARDLIST_PATH = "/api/zpgeek/app/geek/search/cardlist"
 
 
@@ -143,6 +144,39 @@ class BossClient:
         r = self._http("GET", HOST + BATCH_PATH + "?" + q, data=s["encBody"], headers=self._headers())
         return self.raise_for_auth(self._decode_resp(r.content, key))
 
+    # ---- v14.190 batch envelope: GET /api/batch/batchRunV2?batch_method_feed=[...] ----
+    # Reproduces BaseBatchApiRequest.getBatchParams + net.bosszhipin.base.k.a: each subrequest is
+    # one string `"method=<dotted.path>&k=v&…"` (params Java-URLEncoder-encoded, i.e. '+' for space),
+    # joined with ", " inside a JSON-ish array (ArrayList.toString of quoted entries). The whole
+    # feed is a single outer query param; the outer path is on the no-secretKey whitelist
+    # (config.p.f40637a), so key=None works even for subrequests whose standalone path is NOT
+    # whitelisted. Response envelope zpData is keyed by the dotted method names (@d8.c mappings).
+
+    @staticmethod
+    def _dotted(path: str) -> str:
+        """/api/zpjob/job/local/data -> zpjob.job.local.data (config.p.j)."""
+        p = path[len("/api/"):] if path.startswith("/api/") else path.lstrip("/")
+        return p.replace("/", ".")
+
+    def call_batch_v2(self, subreqs: list[dict], key: str | None = None) -> dict:
+        """Wrap subreqs ([{"path": ..., "params": {...}}, ...]) in batch_method_feed and call
+        batchRunV2. None values are dropped (the app only serializes non-null fields)."""
+        entries = []
+        for sr in subreqs:
+            e = "method=" + self._dotted(sr["path"])
+            for k, v in (sr.get("params") or {}).items():
+                if v is None:
+                    continue
+                e += "&" + k + "=" + signer.java_url_encode(str(v))
+            entries.append('"' + e + '"')
+        feed = "[" + ", ".join(entries) + "]"
+        return self.call_plain("GET", BATCH_V2_PATH, {"batch_method_feed": feed}, key=key)
+
+    @classmethod
+    def batch_v2_sub(cls, resp: dict, path: str) -> dict:
+        """Pull one subresponse {"code","message","zpData"} out of a batchRunV2 envelope."""
+        return (resp.get("zpData") or {}).get(cls._dotted(path)) or {}
+
     # ---- search ----
     def search(self, query: str, city: str | None = None, page: int = 1, sort: int = -1,
                filter_params: dict | None = None) -> dict:
@@ -184,10 +218,10 @@ class BossClient:
         return self.call_plain("GET", "/api/zpgeek/jobapp/geek/job/querydetail", params, key=self._secret())
 
     # NOTE: geek F1 recommend (GET /api/zpgeek/app/geek/recommend/joblist) is intentionally NOT
-    # exposed. The app only ever calls it wrapped as a `jobListRequest` subReq inside
-    # GeekF1GetListBatchRequest → POST /api/batch/batchRunV2; called standalone (even with the full
-    # z10.b.g param set expectId/encryptExpectId/page/pageSize/sortType/expectPosition/filterParams)
-    # the server rejects it with code 71 参数格式异常. Reproducing the batchRunV2 envelope is future work.
+    # exposed. Called standalone (even with the full z10.b.g param set expectId/encryptExpectId/
+    # page/pageSize/sortType/expectPosition/filterParams) the server rejects it with
+    # code 71 参数格式异常; the app only calls it wrapped in a batchRunV2 envelope
+    # (call_batch_v2 above — that transport exists now, but this wrapping is unverified).
 
     def cities(self) -> dict:
         """Get1004CityRequest — GET /api/zpCommon/config/city (key=None, whitelisted). Full city
@@ -211,6 +245,51 @@ class BossClient:
         if extra:
             params.update(extra)
         return self.call_plain("GET", "/api/zpgeek/app/friend/add", params, key=self._secret())
+
+    # ---- boss (recruiter) endpoints — all wrapped in batchRunV2 (RE'd from v14.190) ----
+    # The App's recruiter home (BossF1) never calls these paths standalone: UserAccountBossBatchRequest
+    # and BossF1GetListBatchRequest both aggregate them as batchRunV2 subrequests. Verified live:
+    # the profile / job-list / job-sort subs all answer code 0 with key=None (outer path is whitelisted).
+    BOSS_JOB_LIST_PATH = "/api/zpjob/job/local/data"        # GetBossJobListRequest — my posted jobs
+    BOSS_JOB_SORT_PATH = "/api/zpjob/job/sort/list"         # GetJobSortListRequest — job switcher
+    BOSS_DETAIL_PATH = "/api/zpboss/app/boss/get/detail"    # GetUserAccountBossDetailRequest — my profile
+    BOSS_RCMD_PATH = "/api/zpjob/recommend/geek/list"       # BossF1GetGeekListRequest — 推荐牛人
+    BOSS_SEARCH_PATH = "/api/zpitem/boss/search"            # GetAdvancedSearchGeekListRequest — 牛人搜索
+
+    def boss_account(self) -> dict:
+        """UserAccountBossBatchRequest — one batchRunV2 carrying my profile + job list + job sort list.
+        Read the subs with batch_v2_sub(resp, BossClient.BOSS_DETAIL_PATH) etc."""
+        return self.call_batch_v2([
+            {"path": self.BOSS_DETAIL_PATH},
+            {"path": self.BOSS_JOB_LIST_PATH},
+            {"path": self.BOSS_JOB_SORT_PATH},
+        ])
+
+    def boss_jobs(self) -> dict:
+        """Just the posted-jobs sub (zpjob.job.local.data), for when the feed template isn't loaded."""
+        return self.call_batch_v2([{"path": self.BOSS_JOB_LIST_PATH}])
+
+    def boss_recommend_geeks(self, job_id, page: int = 1, page_size: int = 15, sort_type: int = 0,
+                             filter_params=None, source: int = 0) -> dict:
+        """BossF1GetGeekListRequest — 推荐牛人 for one of MY jobs (recruiter F1 home feed).
+        Params mirror BossF1DataViewModel.E0: jobId/page/pageSize/sortType/filterParams/source/uuid/
+        coverScreenMemory. `filter_params` is the raw filterParams JSON string (F1 entity's k()).
+        The server answers inner code 200001 当前职位不在线 when job_id is not an online job of the
+        account, so a closed test posting is not a transport failure."""
+        params = {"jobId": str(job_id), "page": str(page), "pageSize": str(page_size),
+                  "sortType": str(sort_type), "source": str(source),
+                  "uuid": str(uuid.uuid4()), "coverScreenMemory": "0"}
+        if filter_params is not None:
+            params["filterParams"] = (filter_params if isinstance(filter_params, str)
+                                      else json.dumps(filter_params, ensure_ascii=False,
+                                                      separators=(",", ":")))
+        return self.call_batch_v2([{"path": self.BOSS_RCMD_PATH, "params": params}])
+
+    @staticmethod
+    def parse_boss_jobs(resp: dict) -> list[dict]:
+        """jobList of a batchRunV2 envelope (or of the boss_jobs() response)."""
+        sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_JOB_LIST_PATH)
+        return ((sub.get("zpData") or {}).get("jobList")) or []
 
     @staticmethod
     def parse_expects(whoami_resp: dict) -> list[dict]:

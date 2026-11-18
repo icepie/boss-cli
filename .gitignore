@@ -31,3 +31,6 @@ captures/*.raw
 # research scaffolding — not shipped in the public tool repo (kept locally)
 signer-unidbg/
 frida/
+
+# uv lockfile (regenerated locally by `uv run`)
+uv.lock
