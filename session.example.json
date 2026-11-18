@@ -1,6 +1,6 @@
 {
   "t2": "<PASTE_YOUR_t2_TOKEN_FROM_A_LOGGED_IN_DEVICE>",
-  "v": "14.050",
+  "v": "14.190",
   "app_id": "1003",
   "uniqid": "<redacted>",
   "client_info": {
@@ -16,7 +16,7 @@
     "oaid": "<redacted>",
     "oaid_honor": "<redacted>",
     "did": "<redacted>",
-    "tinker_id": "Prod-arm64-v8a-release-14.050.1405010_0403-09-30-48",
+    "tinker_id": "Prod-arm64-v8a-release-14.190.1419010_1026-09-56-15",
     "is_bg_req": 0,
     "network": "wifi",
     "operator": "UNKNOWN",
@@ -24,7 +24,7 @@
     "version_flag": "1405010"
   },
   "curidentity": "0",
-  "user_agent": "NetType/wifi Screen/1080X2209 BossZhipin/14.050 Android 36",
+  "user_agent": "NetType/wifi Screen/1080X2209 BossZhipin/14.190 Android 29",
   "cardlist_defaults": {
     "bizCode": "boss_serv13_1404_925",
     "encryptExpectId": "<from-your-session>",

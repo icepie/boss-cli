@@ -21,6 +21,38 @@ BATCH_PATH = "/api/batch/requests"
 BATCH_V2_PATH = "/api/batch/batchRunV2"
 CARDLIST_PATH = "/api/zpgeek/app/geek/search/cardlist"
 
+# The app version this client's request shapes were RE'd against (batchRunV2 + recruiter endpoints
+# come from 14.190 captures). A session that declares a DIFFERENT version in `v` / user_agent /
+# client_info.version_flag is describing a device that never existed — see _check_version.
+APP_VERSION = "14.190"
+DEFAULT_USER_AGENT = f"NetType/wifi Screen/1080X2209 BossZhipin/{APP_VERSION} Android 36"
+
+
+def _check_version(s: dict) -> None:
+    """Refuse a session whose three version declarations disagree.
+
+    `v` (query param), user_agent (`BossZhipin/<v>`) and client_info.version_flag (`<v without
+    dots><build>`) all travel in the same request; a mismatch means the profile was stitched
+    together from different captures, and the server's version-gated branches then answer
+    unpredictably (empty 参数错误 instead of data). Only fields that are PRESENT are checked."""
+    v = str(s.get("v") or APP_VERSION)
+    ua = s.get("user_agent") or ""
+    if "BossZhipin/" in ua:
+        tail = ua.split("BossZhipin/", 1)[1].split()
+        ua_v = tail[0] if tail else ""
+        if ua_v and ua_v != v:
+            raise ValueError(
+                f"session 版本不一致: v={v!r} 但 user_agent 声明 BossZhipin/{ua_v!r}。"
+                f"同一台设备必须只有一个版本；把 v / user_agent / client_info.version_flag "
+                f"统一成同一次抓包的值（当前代码面向 v{APP_VERSION}）。")
+    ci = s.get("client_info") or {}
+    if isinstance(ci, dict):
+        flag = str(ci.get("version_flag") or "")
+        if flag and not flag.startswith(v.replace(".", "")):
+            raise ValueError(
+                f"session 版本不一致: v={v!r} 但 client_info.version_flag={flag!r}"
+                f"（应形如 {v.replace('.', '')}<build>）。请统一这三个字段。")
+
 
 class AuthExpired(RuntimeError):
     """The server rejected t2 (code==7, 当前登录状态已失效). Re-login to refresh it."""
@@ -31,6 +63,7 @@ class AuthExpired(RuntimeError):
 
 class BossClient:
     def __init__(self, session: dict):
+        _check_version(session)
         self.s = session
         self.http = requests.Session()
 
@@ -83,7 +116,7 @@ class BossClient:
 
     def _headers(self) -> dict:
         return {
-            "User-Agent": self.s.get("user_agent", "NetType/wifi Screen/1080X2209 BossZhipin/14.050 Android 36"),
+            "User-Agent": self.s.get("user_agent", DEFAULT_USER_AGENT),
             "zp-accept-encoding": "1", "zp-accept-compressing": "3", "zp-accept-encrypting": "1",
             "t2": self.s["t2"], "traceId": "A-" + str(uuid.uuid4()),
         }
@@ -96,7 +129,7 @@ class BossClient:
             "curidentity": self.s.get("curidentity", "0"),
             "req_time": signer.now_ms(),
             "uniqid": self.s["uniqid"],
-            "v": self.s.get("v", "14.050"),
+            "v": self.s.get("v", APP_VERSION),
         }
 
     def _wire(self, s: dict) -> str:
@@ -122,8 +155,12 @@ class BossClient:
 
     # ---- generic signed calls (reused by search + the read endpoints) ----
     def call_plain(self, method: str, path: str, req_params: dict, key: str | None = None) -> dict:
-        """Sign an ordinary GET/POST (net.bosszhipin.base.m.e branch) and return the decoded body."""
-        params = {**self._outer_params(), **{k: v for k, v in req_params.items() if v not in (None, "")}}
+        """Sign an ordinary GET/POST (net.bosszhipin.base.m.e branch) and return the decoded body.
+
+        Only None is dropped: the app serializes every non-null @d8.a field, so an EMPTY string is
+        a real value (`securityId=&encryptSubscribeId=`) and must stay on the wire — dropping it
+        changes "present but empty" into "absent", which some endpoints treat differently."""
+        params = {**self._outer_params(), **{k: v for k, v in req_params.items() if v is not None}}
         s = signer.sign_request(params, path, key)
         wire = self._wire(s)
         if method.upper() == "GET":
@@ -255,10 +292,39 @@ class BossClient:
     BOSS_DETAIL_PATH = "/api/zpboss/app/boss/get/detail"    # GetUserAccountBossDetailRequest — my profile
     BOSS_RCMD_PATH = "/api/zpjob/recommend/geek/list"       # BossF1GetGeekListRequest — 推荐牛人
     BOSS_SEARCH_PATH = "/api/zpitem/boss/search"            # GetAdvancedSearchGeekListRequest — 牛人搜索
+    BOSS_ADD_FRIEND_PATH = "/api/zpjob/chat/add/friend"     # BossCreateFriendRequest — 给牛人打招呼
+    BOSS_ADD_FRIEND_AI_PATH = "/api/zprelation/friend/boss/add"  # fromAiRecommend variant (a.R2)
 
-    def boss_account(self) -> dict:
+    # UserAccountBossBatchRequest, exactly as module/login/util/g.java:c builds it (16 subs).
+    BOSS_ACCOUNT_SUBS = [
+        {"path": "/api/zpboss/app/boss/get/detail"},                    # zpboss.app.boss.get.detail
+        {"path": "/api/zpjob/job/local/data"},                          # zpjob.job.local.data
+        {"path": "/api/zpuser/dynamicBar/get"},                         # zpuser.dynamicBar.get
+        {"path": "/api/zpuser/user/getBottomBtns"},                     # zpuser.user.getBottomBtns
+        {"path": "/api/zpjob/job/sort/list"},                           # zpjob.job.sort.list
+        {"path": "/api/zpjob/guide/f1"},                                # zpjob.guide.f1
+        {"path": "/api/certification/security/get"},                    # certification.security.get
+        {"path": "/api/zpitem/boss/getItemMallF3"},                     # zpitem.boss.getItemMallF3
+        {"path": "/api/zpp/app/user/unBzbOrderList"},                   # zpp.app.user.unBzbOrderList
+        {"path": "/api/zpp/app/user/rechargeGuide"},                    # zpp.app.user.rechargeGuide
+        {"path": "/api/zpitem/resumeDeliver/getDeliverSchedule"},       # zpitem.resumeDeliver.getDeliverSchedule
+        {"path": "/api/zpblock/job/not/chatkey/list"},                  # zpblock.job.not.chatkey.list
+        {"path": "/api/hunter/app/hunter/home/guidanceBar"},            # hunter.app.hunter.home.guidanceBar
+        {"path": "/api/zpinterview/boss/interview/aiFocusPoints/experiment"},  # zpinterview.boss…experiment
+        {"path": "/api/certification/security/sceneLimit/batchCheck",
+         "params": {"sceneTypes": "18,21"}},                            # certification.security.sceneLimit.batchCheck
+        {"path": "/api/zpjob/security/sceneLimit/check",
+         "params": {"sceneType": "118"}},                               # zpjob.security.sceneLimit.check
+    ]
+
+    def boss_account(self, full: bool = False) -> dict:
         """UserAccountBossBatchRequest — one batchRunV2 carrying my profile + job list + job sort list.
-        Read the subs with batch_v2_sub(resp, BossClient.BOSS_DETAIL_PATH) etc."""
+        Read the subs with batch_v2_sub(resp, BossClient.BOSS_DETAIL_PATH) etc.
+        `full=True` reproduces ALL 16 subs of module/login/util/g.java:c (recruiter home aggregate:
+        dynamic bar, bottom buttons, item mall, deliver schedule, not-chat-key jobs, unpaid orders,
+        security scene limits …); two of them carry params (sceneTypes=18,21 / sceneType=118)."""
+        if full:
+            return self.call_batch_v2(self.BOSS_ACCOUNT_SUBS)
         return self.call_batch_v2([
             {"path": self.BOSS_DETAIL_PATH},
             {"path": self.BOSS_JOB_LIST_PATH},
@@ -284,6 +350,27 @@ class BossClient:
                                       else json.dumps(filter_params, ensure_ascii=False,
                                                       separators=(",", ":")))
         return self.call_batch_v2([{"path": self.BOSS_RCMD_PATH, "params": params}])
+
+    def boss_add_friend(self, security_id: str, job_id: str | None = None,
+                        friend_id: str | None = None, expect_id: str | None = None,
+                        lid: str | None = None, from_: str | None = None,
+                        entrance: int = 77, greet: str | None = None,
+                        language_id: str | None = None, extra: dict | None = None) -> dict:
+        """BossCreateFriendRequest — GET /api/zpjob/chat/add/friend (key=secretKey). WRITE: 给牛人打招呼
+        / 发起沟通. Params mirror CreateFriendManager.g() (the boss branch):
+          * securityId + lid come from the GEEK CARD (推荐牛人 card), not from my job
+          * friendId / expectId describe the GEEK (card userId / expectId)
+          * jobId is one of MY jobs (the card is served in that job's recommend feed)
+          * entrance is the UI entry: 77 = F1 推荐卡 (the app's primitive default is 0)
+          * greet = 打招呼语, languageId = 语音/外语场次 (omit unless that scene applies)
+        None params are dropped, mirroring the app's null String fields; `entrance` is a Java int
+        so it is always serialized (default 77 here)."""
+        params = {"securityId": security_id, "jobId": job_id, "friendId": friend_id,
+                  "expectId": expect_id, "lid": lid, "from": from_,
+                  "entrance": str(entrance), "greet": greet, "languageId": language_id}
+        if extra:
+            params.update(extra)
+        return self.call_plain("GET", self.BOSS_ADD_FRIEND_PATH, params, key=self._secret())
 
     @staticmethod
     def parse_boss_jobs(resp: dict) -> list[dict]:

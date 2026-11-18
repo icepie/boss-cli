@@ -68,7 +68,10 @@ def _client(args) -> BossClient:
         sys.exit(f"session file not found: {args.session}\n"
                  f"Copy session.example.json -> session.local.json and fill in your t2 token "
                  f"and device profile (see README), or run `boss login --phone <号码> --solve`.")
-    client = BossClient.from_file(args.session)
+    try:
+        client = BossClient.from_file(args.session)
+    except ValueError as e:      # stitched session profile — _check_version
+        sys.exit(f"[session 版本不一致] {e}")
     if getattr(args, "token", None):
         client.s["t2"] = args.token
     return client
@@ -95,6 +98,7 @@ def cmd_search(args):
     last_page = page_nums[-1]
     seen: set = set()
     all_jobs: list[dict] = []
+    errors = 0
 
     try:
         for label, code in cities:
@@ -107,6 +111,9 @@ def cmd_search(args):
                           f"cardlist={card.get('code')} {card.get('message')}", file=sys.stderr)
                     if resp.get("code") in (36, 37):   # 账户异常/频控 —— 降速或稍后再试
                         print("    [i] 触发 BOSS 风控/频控，请降低频率、隔一段时间再搜。", file=sys.stderr)
+                    _identity_hint(client, card.get("code") or resp.get("code"),
+                                   card.get("message") or resp.get("message"), "geek")
+                    errors += 1
                     break
                 jobs = BossClient.parse_jobs(resp)
                 if not jobs:
@@ -155,6 +162,8 @@ def cmd_search(args):
         pg = f"pages=1..{last_page}" if last_page > 1 else "page=1"
         print(f"# {len(all_jobs)} jobs for '{args.query}' (cities={[c[0] for c in cities]}, {pg}{flt})")
     print(body)
+    if errors and not all_jobs:      # every city failed -> non-zero so scripts can branch
+        sys.exit(2)
 
 
 def cmd_filters(args):
@@ -207,19 +216,38 @@ def _run(fn):
         _auth_hint(); sys.exit(2)
 
 
-def _check_code(resp: dict, what: str):
+SIDE_CURIDENTITY = {"geek": "0", "boss": "1"}
+
+
+def _identity_hint(client, code, message: str = "", side: str | None = None):
+    """BOSS answers code 24 请切换身份后再试 (and 71 参数格式异常 on some paths) when the session's
+    curidentity doesn't match the API side being called: 0 = 求职端 (geek), 1 = 招聘端 (boss).
+    `side` is the command's own side, so a plain 71 on the CORRECT side (bad params) stays quiet."""
+    cur = str(getattr(client, "s", {}).get("curidentity", "0"))
+    mismatched = side is not None and cur != SIDE_CURIDENTITY.get(side, cur)
+    if code != 24 and "切换身份" not in (message or "") and not (code == 71 and mismatched):
+        return False
+    side = {"0": "求职端(geek)", "1": "招聘端(boss)"}.get(cur, f"curidentity={cur}")
+    print(f"    [i] 该 session 是 {side} 身份，不能调用另一侧接口。用同身份的 session，"
+          f"或 `boss login --identity geek|boss` 重新登录。", file=sys.stderr)
+    return True
+
+
+def _check_code(resp: dict, what: str, client=None, side: str | None = None):
     if isinstance(resp, dict) and resp.get("code") not in (0, None):
         msg = resp.get("message")
         print(f"[!] {what}: code={resp.get('code')} {msg}", file=sys.stderr)
         if resp.get("code") in (36, 37):
             print("    [i] 触发 BOSS 风控/频控，请降低频率、稍后再试。", file=sys.stderr)
+        if client is not None:
+            _identity_hint(client, resp.get("code"), msg, side)
         sys.exit(2)
 
 
 def cmd_whoami(args):
     client = _client(args)
     resp = _run(lambda: client.whoami())
-    _check_code(resp, "whoami")
+    _check_code(resp, "whoami", client, side="geek")
     if args.json:
         print(json.dumps(resp, ensure_ascii=False, indent=2)); return
     expects = BossClient.parse_expects(resp)
@@ -243,7 +271,7 @@ def cmd_whoami(args):
 def cmd_detail(args):
     client = _client(args)
     resp = _run(lambda: client.job_detail(args.security_id, lid=args.lid, expect_id=args.expect_id))
-    _check_code(resp, "detail")
+    _check_code(resp, "detail", client, side="geek")
     if args.json:
         print(json.dumps(resp, ensure_ascii=False, indent=2)); return
     zp = resp.get("zpData", resp) or {}
@@ -265,7 +293,7 @@ def cmd_detail(args):
 def cmd_cities(args):
     client = _client(args)
     resp = _run(lambda: client.cities())
-    _check_code(resp, "cities")
+    _check_code(resp, "cities", client, side="geek")
     zp = resp.get("zpData", resp) or {}
     flat = []
     def walk(nodes):
@@ -306,7 +334,7 @@ def cmd_chat(args):
     resp = _run(lambda: client.add_friend(
         args.security_id, job_id=args.job_id, lid=args.lid, expect_id=args.expect_id,
         friend_id=args.friend_id))
-    _check_code(resp, "chat")
+    _check_code(resp, "chat", client, side="geek")
     rel = (resp.get("zpData") or {}).get("relation") or {}
     print(f"[✓] 打招呼成功 · {resp.get('message') or 'ok'}"
           + (f" · 已与 {rel.get('name')}（{rel.get('jobName')}）建立会话" if rel else ""))
@@ -314,10 +342,12 @@ def cmd_chat(args):
         print(json.dumps(resp, ensure_ascii=False, indent=2))
 
 
-def _sub_check(sub: dict, what: str):
+def _sub_check(sub: dict, what: str, client=None, side: str = "boss"):
     """Validate a batchRunV2 subresponse's inner code (outer envelope is already code 0 here)."""
     if (sub.get("code") or 0) not in (0, None):
         print(f"[!] {what}: code={sub.get('code')} {sub.get('message')}", file=sys.stderr)
+        if client is not None:
+            _identity_hint(client, sub.get("code"), sub.get("message"), side)
         sys.exit(2)
 
 
@@ -328,14 +358,49 @@ def _boss_subs_text(resp: dict, paths: list[tuple[str, str]]):
         print(f"  {label}: code={sub.get('code')} {sub.get('message')}")
 
 
+def _digest(zp: dict, limit: int = 3) -> str:
+    """One-line summary of a subresponse's zpData: list sizes + scalar values (never the whole blob)."""
+    if not isinstance(zp, dict) or not zp:
+        return ""
+    parts = []
+    for k, v in zp.items():
+        if isinstance(v, list):
+            parts.append(f"{k}[{len(v)}]")
+        elif isinstance(v, (str, int, float, bool)):
+            s = str(v)
+            parts.append(f"{k}={s[:24] + ('…' if len(s) > 24 else '')}")
+        elif isinstance(v, dict) and v:
+            parts.append(f"{k}{{{len(v)}}}")
+        if len(parts) >= limit:
+            break
+    return "  " + " ".join(parts)
+
+
 def cmd_bossme(args):
-    """Recruiter identity: company + boss profile (UserAccountBossBatchRequest detail sub)."""
+    """Recruiter identity: company + boss profile (UserAccountBossBatchRequest detail sub).
+    --full sends all 16 subs of the app's account aggregate and digests each reply."""
     client = _client(args)
-    resp = _run(client.boss_account)
+    resp = _run(lambda: client.boss_account(full=args.full))
     if resp.get("code") not in (0, None):
-        _check_code(resp, "batchRunV2")
+        _check_code(resp, "batchRunV2", client, side="boss")
+    if args.full:
+        if args.json:
+            print(json.dumps(resp, ensure_ascii=False, indent=2)); return
+        subs = BossClient.BOSS_ACCOUNT_SUBS
+        print(f"# 账户整批 {len(subs)} 个子请求 (UserAccountBossBatchRequest)")
+        bad = 0
+        for sr in subs:
+            sub = BossClient.batch_v2_sub(resp, sr["path"])
+            code = sub.get("code")
+            if code not in (0, None):
+                bad += 1
+            print(f"  {BossClient._dotted(sr['path']):<52} code={code} "
+                  f"{_digest(sub.get('zpData') or {})}")
+        if bad:
+            print(f"[!] {bad} 个子请求未 code=0；--json 看原文", file=sys.stderr)
+        return
     sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_DETAIL_PATH)
-    _sub_check(sub, "boss detail")
+    _sub_check(sub, "boss detail", client)
     if args.json:
         print(json.dumps(sub, ensure_ascii=False, indent=2)); return
     ud = sub.get("zpData") or {}
@@ -359,9 +424,9 @@ def cmd_bossjobs(args):
     client = _client(args)
     resp = _run(client.boss_jobs)
     if resp.get("code") not in (0, None):
-        _check_code(resp, "batchRunV2")
+        _check_code(resp, "batchRunV2", client, side="boss")
     sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_JOB_LIST_PATH)
-    _sub_check(sub, "job list")
+    _sub_check(sub, "job list", client)
     jobs = BossClient.parse_boss_jobs(resp)
     if args.json:
         print(json.dumps(jobs, ensure_ascii=False, indent=2)); return
@@ -385,7 +450,7 @@ def cmd_bossrcmd(args):
         args.job_id, page=args.page, page_size=args.page_size,
         sort_type=args.sort_type, filter_params=fp))
     if resp.get("code") not in (0, None):
-        _check_code(resp, "batchRunV2")
+        _check_code(resp, "batchRunV2", client, side="boss")
     sub = BossClient.batch_v2_sub(resp, BossClient.BOSS_RCMD_PATH)
     if args.json:
         print(json.dumps(sub, ensure_ascii=False, indent=2)); return
@@ -393,6 +458,7 @@ def cmd_bossrcmd(args):
         print(f"[!] 推荐牛人: code={sub.get('code')} {sub.get('message')}", file=sys.stderr)
         if str(sub.get("code")) == "200001":
             print("    [i] 该职位当前不在线；用 `boss jobs` 换一个在线职位。", file=sys.stderr)
+        _identity_hint(client, sub.get("code"), sub.get("message"), "boss")
         sys.exit(2)
     zd = sub.get("zpData") or {}
     shown = 0
@@ -409,6 +475,40 @@ def cmd_bossrcmd(args):
     if not shown:
         print(f"# 推荐牛人: 无列表字段；zpData keys={list(zd)[:12]}")
         print(json.dumps(sub, ensure_ascii=False, indent=2))
+
+
+def cmd_boss_greet(args):
+    """WRITE — 招聘端给牛人打招呼 (BossCreateFriendRequest). securityId/lid/friend-id/expect-id 都来自
+    `boss rcmd <jobId> --json` 的推荐卡；dry-run by default, --confirm actually sends."""
+    client = _client(args)
+    job_id = args.job_id
+    if not job_id:
+        jobs = BossClient.parse_boss_jobs(_run(client.boss_jobs))
+        if not jobs:
+            sys.exit("[✗] 没有职位可挂靠；用 --job-id 指定，或先发布在线职位。")
+        job_id = str(jobs[0].get("jobId"))
+        print(f"[i] 未给 --job-id，用第一个职位 {job_id}（{jobs[0].get('positionName','')}）", file=sys.stderr)
+    payload = {"securityId": args.security_id, "jobId": job_id, "friendId": args.friend_id,
+               "expectId": args.expect_id, "lid": args.lid, "from": args.from_,
+               "entrance": args.entrance, "greet": args.greet, "languageId": args.language_id}
+    if not args.confirm:
+        print("[dry-run] 将向 GET /api/zpjob/chat/add/friend 发起打招呼（写操作，会以你的招聘身份发出）：")
+        print("  " + json.dumps({k: v for k, v in payload.items() if v is not None}, ensure_ascii=False))
+        print("  确认无误后加 --confirm 真正发送。")
+        if not args.friend_id or not args.lid:
+            print("  [i] 建议带上 --friend-id / --lid（来自 `boss rcmd <jobId> --json` 推荐卡），"
+                  "否则服务端可能 code 17 缺少必要参数。")
+        return
+    resp = _run(lambda: client.boss_add_friend(
+        args.security_id, job_id=job_id, friend_id=args.friend_id, expect_id=args.expect_id,
+        lid=args.lid, from_=args.from_, entrance=args.entrance, greet=args.greet,
+        language_id=args.language_id))
+    _check_code(resp, "boss greet", client, side="boss")
+    rel = (resp.get("zpData") or {}).get("relation") or {}
+    print(f"[✓] 招呼已发出 · {resp.get('message') or 'ok'}"
+          + (f" · 已与 {rel.get('name')} 建立会话" if rel else ""))
+    if args.json:
+        print(json.dumps(resp, ensure_ascii=False, indent=2))
 
 
 def cmd_api(args):
@@ -612,6 +712,8 @@ def main(argv=None):
     hp.set_defaults(func=cmd_chat)
 
     mep = sub.add_parser("me", help="(招聘端) 我的 boss 身份/公司 (batchRunV2 zpboss.app.boss.get.detail)")
+    mep.add_argument("--full", action="store_true",
+                     help="拉取整批 16 个子请求（动态栏/底部按钮/交付进度/未读职位/安全场景…）")
     mep.add_argument("--json", action="store_true")
     mep.add_argument("--token", help="override t2 auth token")
     mep.set_defaults(func=cmd_bossme)
@@ -630,6 +732,21 @@ def main(argv=None):
     rp.add_argument("--json", action="store_true")
     rp.add_argument("--token", help="override t2 auth token")
     rp.set_defaults(func=cmd_bossrcmd)
+
+    gp = sub.add_parser("greet", help="(招聘端) 给牛人打招呼（写操作，dry-run 除非 --confirm）")
+    gp.add_argument("security_id", help="牛人卡片的 securityId（来自 `boss rcmd --json`）")
+    gp.add_argument("--job-id", help="挂靠职位 jobId；默认取第一个职位")
+    gp.add_argument("--friend-id", help="牛人的数字 userId（推荐卡里的 userId）")
+    gp.add_argument("--expect-id", help="牛人的 expectId（推荐卡里）")
+    gp.add_argument("--lid", help="推荐卡的 lid")
+    gp.add_argument("--from", dest="from_", help="来源标识（可选）")
+    gp.add_argument("--entrance", type=int, default=77, help="入口码，默认 77 = F1 推荐卡")
+    gp.add_argument("--greet", help="打招呼语（可选）")
+    gp.add_argument("--language-id", help="外语/语音场次 id（可选）")
+    gp.add_argument("--confirm", action="store_true", help="真正发送（默认 dry-run）")
+    gp.add_argument("--json", action="store_true")
+    gp.add_argument("--token", help="override t2 auth token")
+    gp.set_defaults(func=cmd_boss_greet)
 
     rp2 = sub.add_parser("api", help="原始调用任意接口（招聘端多数要用 --batch 包 batchRunV2）")
     rp2.add_argument("path", help="e.g. /api/zpitem/boss/search")

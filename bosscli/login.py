@@ -18,7 +18,7 @@ from __future__ import annotations
 import json, uuid
 import requests
 from . import signer
-from .client import BossClient
+from .client import APP_VERSION, DEFAULT_USER_AGENT, BossClient
 
 HOST = "https://api5.zhipin.com"
 MAN_MACHINE_PATH = "/api/zppassport/man/machine"
@@ -79,13 +79,13 @@ class LoginClient:
             "curidentity": self.d.get("curidentity", "0"),
             "req_time": signer.now_ms(),
             "uniqid": self.d["uniqid"],
-            "v": self.d.get("v", "14.050"),
+            "v": self.d.get("v", APP_VERSION),
         }
 
     def _headers(self) -> dict:
         # pre-login: no t2. zp-accept-* mirror the app so the server picks an encoding _decode knows.
         return {
-            "User-Agent": self.d.get("user_agent", "NetType/wifi Screen/1080X2209 BossZhipin/14.050 Android 36"),
+            "User-Agent": self.d.get("user_agent", DEFAULT_USER_AGENT),
             "zp-accept-encoding": "1", "zp-accept-compressing": "3", "zp-accept-encrypting": "1",
             "traceId": "A-" + str(uuid.uuid4()),
         }
@@ -94,7 +94,8 @@ class LoginClient:
         """Sign (m.e branch, key=None) and send. app_id is appended AFTER signing; the signed
         param string is sent verbatim (query for GET, form body for POST) so the server re-signs
         over the exact same strD."""
-        params = {**self._common_params(), **{k: v for k, v in req_params.items() if v not in (None, "")}}
+        # only None is dropped — the app serializes non-null fields, empty string included
+        params = {**self._common_params(), **{k: v for k, v in req_params.items() if v is not None}}
         s = signer.sign_request(params, path, key=None)
         wire = (s["strD"]
                 + "&sp=" + requests.utils.quote(s["sp"], safe="")

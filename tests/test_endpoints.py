@@ -97,3 +97,14 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn(); print("ok", name); n += 1
     print(f"\n{n} tests passed")
+
+
+def test_boss_greet_uses_secretkey_and_drops_none_params():
+    # BossCreateFriendRequest (recruiter 打招呼): non-whitelisted -> secretKey, and unset String
+    # fields must be ABSENT (not empty) while the Java int `entrance` is always serialized.
+    c, calls = _capture()
+    c.boss_add_friend("SEC-G", job_id="777", friend_id="888", lid="L1")
+    strD = _assert_signed_with(calls[-1], "/api/zpjob/chat/add/friend", SECRET)
+    for kv in ("securityId=SEC-G", "jobId=777", "friendId=888", "lid=L1", "entrance=77"):
+        assert kv in strD
+    assert "greet=" not in strD and "expectId=" not in strD and "languageId=" not in strD

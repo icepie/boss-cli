@@ -71,6 +71,12 @@ cp session.example.json session.local.json    # then paste your t2 / client_info
 `session.local.json` is gitignored (it holds your token). `t2` expires — when searches start returning
 `invalid auth`, grab a fresh `t2` the same way.
 
+Also capture `v` and `user_agent` from the SAME request: the client refuses a session whose
+`v` / `user_agent` (`BossZhipin/<v>`) / `client_info.version_flag` disagree — a stitched profile is not
+a device the server has ever seen. One session also carries ONE identity (`curidentity`: 0 = 求职端,
+1 = 招聘端); geek endpoints answer `24 请切换身份后再试` (or `71 参数格式异常`) under a boss session,
+and the CLI now says so instead of blaming the signature.
+
 ## Usage
 
 ```bash
@@ -156,14 +162,22 @@ boss jobs                        # my posted jobs (jobId / raw status codes / en
 boss rcmd <jobId>                # 推荐牛人 for one of my jobs (needs an ONLINE job)
 boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
 
+# 打招呼 to a geek (WRITE): securityId/lid/friend-id/expect-id come from `boss rcmd --json`
+boss greet <securityId> --job-id <jobId> --friend-id <geekUserId> --lid <lid>            # dry-run
+boss greet <securityId> --job-id <jobId> --friend-id <geekUserId> --lid <lid> --confirm  # send it
+
 # any other endpoint: --batch wraps it in batchRunV2 (most recruiter paths need this)
 boss api --batch /api/zpitem/boss/search 'filterParams={"query":"Python"}' page=1 pageSize=15
 boss api --secret /api/<non-whitelisted-plain-path> k=v   # plain call signed with secretKey
 ```
 
-Verified live against a real recruiter session: `me` and `jobs` (plus the profile / job-sort subs of
-the account batch) answer code 0. `rcmd` answers inner `200001 当前职位不在线` when the jobId is not
-an online posting of the account — that is the server's account-state answer, not a signing failure.
+Verified live against a real recruiter session: `me`, `me --full` (all 16 subs of the account batch:
+dynamic bar / bottom buttons / item mall / deliver schedule / not-chat-key jobs / security scenes …)
+and `jobs` answer code 0. `rcmd` answers inner `200001 当前职位不在线` when the jobId is not an online
+posting, and geek search answers `1 发布职位后才能查看牛人哦` without one — both are the server's
+account-state answers, not signing failures. `greet` therefore cannot be verified live on an account
+with no online job (no geek card ⇒ no `securityId` to greet): its param set and signing are pinned by
+offline tests instead.
 
 ### MCP server
 
@@ -356,14 +370,20 @@ boss jobs                        # 我发布的职位（jobId / 原始状态码 
 boss rcmd <jobId>                # 某职位的推荐牛人（职位需在线）
 boss rcmd <jobId> --page 2 --sort-type 1 --filter-params '{"salary":"407"}'
 
+# 给牛人打招呼（写操作）：securityId/lid/friend-id/expect-id 都来自 `boss rcmd --json` 推荐卡
+boss greet <securityId> --job-id <jobId> --friend-id <牛人userId> --lid <lid>            # dry-run 预览
+boss greet <securityId> --job-id <jobId> --friend-id <牛人userId> --lid <lid> --confirm  # 真正发送
+
 # 任意其它接口：--batch 会包进 batchRunV2（多数招聘端路径都需要）
 boss api --batch /api/zpitem/boss/search 'filterParams={"query":"Python"}' page=1 pageSize=15
 boss api --secret /api/<不在白名单的普通路径> k=v      # 用 secretKey 加签的普通调用
 ```
 
-已用真实招聘端 session 实测：`me`、`jobs`（以及账户批次里的 profile / 职位排序子请求）都返回 code 0。
-当 jobId 不是该账号在线职位时，`rcmd` 内层返回 `200001 当前职位不在线` —— 这是服务端对账号状态的答复，
-不是加签失败。
+已用真实招聘端 session 实测：`me`、`me --full`（账户批次的全部 16 个子请求：动态栏 / 底部按钮 / 权益商城 /
+交付进度 / 未沟通职位 / 安全场景 …）、`jobs` 都返回 code 0。jobId 不是在线职位时 `rcmd` 内层返回
+`200001 当前职位不在线`，没有在线职位时牛人搜索返回 `1 发布职位后才能查看牛人哦` —— 都是服务端对账号状态的
+答复，不是加签失败。因此 `greet` 在无在线职位的账号上无法实盘验证（没有牛人卡就没有可打招呼的
+`securityId`）：它的参数集与加签由离线测试锁定。
 
 ### MCP 服务
 
